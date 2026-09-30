@@ -78,9 +78,9 @@ $ git commit -m 'resolve: f.txt'
 $ git push
 ```
 
-- Unpark compares the working file with the stored one.
+- Unpark compares the working file with the stored one, content and mode both.
 - Unchanged: the conflict is restored into the index, as git left it.
-- Changed or deleted: no conflict is recreated. The working file is your resolution, left unstaged for review.
+- Changed in content or mode, or deleted: no conflict is recreated. The working file is your resolution, left unstaged for review.
 - Either way the path is released from the hangar.
 - You can also work the hangar by hand: fix the file, `git add -- <path>`, release it with `git rm -r .hangar/stages/<path>`, and commit.
 

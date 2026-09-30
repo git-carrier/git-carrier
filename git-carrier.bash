@@ -71,9 +71,10 @@ EOF
     cat <<'EOF'
 usage: git unpark [<path>...]
 
-Take held paths back out of the hangar. A path unchanged since park reopens
-as a conflict; a path you have edited or deleted is your resolution, left
-unstaged for review. Either way, the path is released from the hangar.
+Take held paths back out of the hangar. A path unchanged since park, in
+content and mode, reopens as a conflict; a path you have changed in content
+or mode, or deleted, is your resolution, left unstaged for review. Either
+way, the path is released from the hangar.
 
 With no paths, every held path is taken. A directory takes every held path under
 it. Paths resolve from your current directory, and a path naming nothing in the
@@ -453,6 +454,62 @@ require_worktree_hangar() {
   refuse "the working tree's $HANGAR is missing or unreadable: restore it (git checkout -- $HANGAR), then re-run"
 }
 
+# The first symlink (or non-directory) on the worktree path of $HANGAR/stages/$1, into
+# STAGES_LINK as a worktree-relative path, empty when the path is safe to write or remove:
+# park writes the hangar and unpark's release removes it by that worktree path, and a link
+# anywhere on it would carry the write or the removal outside the repository.
+stages_link_component() {
+  local p=$1 d rest comp
+  STAGES_LINK=
+  d="$top/$HANGAR/stages"
+  rest=$p
+  while :; do
+    if [ -e "$d" ] || [ -L "$d" ]; then
+      if [ -L "$d" ] || [ ! -d "$d" ]; then
+        STAGES_LINK=${d#"$top"/}
+        return 0
+      fi
+    else
+      # an absent component is safe, and nothing can exist below it
+      return 0
+    fi
+    [ -n "$rest" ] || return 0
+    comp=${rest%%/*}
+    d="$d/$comp"
+    case $rest in
+    */*) rest=${rest#*/} ;;
+    *) rest= ;;
+    esac
+  done
+}
+
+# Refuse when a symlink (or a non-directory) stands on the worktree path of any of the
+# NUL-delimited paths in $1.
+refuse_stages_links() {
+  local p j seen STAGES_LINK bad nbad
+  bad=()
+  nbad=0
+  while IFS= read -r -d '' p || [ -n "$p" ]; do
+    [ -n "$p" ] || continue
+    stages_link_component "$p"
+    [ -n "$STAGES_LINK" ] || continue
+    seen=0
+    for ((j = 0; j < nbad; j++)); do
+      if [ "${bad[$j]}" = "$STAGES_LINK" ]; then
+        seen=1
+        break
+      fi
+    done
+    [ "$seen" = 1 ] && continue
+    bad[nbad]=$STAGES_LINK
+    nbad=$((nbad + 1))
+  done <"$1"
+  [ "$nbad" -gt 0 ] || return 0
+  refuse_recovery \
+    "a symlink or a non-directory stands where the hangar holds a stage directory: $(cap_list 10 "${bad[@]}")" \
+    "move it away and restore it (git checkout -- $HANGAR/stages), then re-run"
+}
+
 # Refuse while a rebase, cherry-pick, revert, or am is unfinished.
 in_progress_check() {
   local state p op
@@ -628,8 +685,9 @@ dump_stage_tree() {
 }
 
 # Walk the parsed hangar records as per-path blocks. Sets PARKED (every path once, in
-# first-appearance order), nparked, the per-path aggregates PHAVE123[i] and PWSHA[i], and a
-# block list chained per path. A block is one run of adjacent records of one path, spanning
+# first-appearance order), nparked, the per-path aggregates PHAVE123[i], PWSHA[i], and
+# PWMODE[i] (file w's blob and mode), and a block list chained per path. A block is one run
+# of adjacent records of one path, spanning
 # SPAR[BLOCKSTART[b]] .. SPAR[BLOCKEND[b]]; BLOCKHEAD[i] is path i's first block and
 # BLOCKNEXT[b] the next block of its path, so a path's records read in record order by
 # starting at BLOCKHEAD[i] and following BLOCKNEXT.
@@ -649,6 +707,7 @@ walk_stage_blocks() {
   PARKED=()
   PHAVE123=()
   PWSHA=()
+  PWMODE=()
   nparked=0
   BLOCKHEAD=()
   BLOCKNEXT=()
@@ -687,6 +746,7 @@ walk_stage_blocks() {
         PARKED[nparked]=$p
         PHAVE123[nparked]=0
         PWSHA[nparked]=
+        PWMODE[nparked]=
         BLOCKHEAD[nparked]=-1
         BLOCKTAIL[nparked]=-1
         previ=$nparked
@@ -705,6 +765,7 @@ walk_stage_blocks() {
     fi
     if [ "${SSTAGE[$r]}" = w ]; then
       PWSHA[previ]=${SSHA[$r]}
+      PWMODE[previ]=${SMODE[$r]}
     else
       PHAVE123[previ]=1
     fi
@@ -839,10 +900,11 @@ derive_src_desc() {
 # Refuses : an unfinished rebase/cherry-pick/revert/am; octopus merges (one source id is all the
 #           hangar holds); a .hangar of the user's in the worktree (a re-park accepts only the
 #           hangar's own, checked by format line and shape); gitlink conflicts (a stage file is
-#           blob content, a submodule pointer is not); a staged, uncommitted park; nothing to
-#           park (no stopped merge, no parked chain). A manifest first line that is not ours
-#           dies: the hangar is not this tool's. Every refusal runs before the branch creation,
-#           park's first mutation.
+#           blob content, a submodule pointer is not); a symlink or a non-directory standing
+#           on a stages path (a write or a removal never traverses a link); a staged,
+#           uncommitted park; nothing to park (no stopped merge, no parked chain). A manifest
+#           first line that is not ours dies: the hangar is not this tool's. Every refusal
+#           runs before the branch creation, park's first mutation.
 # Effect  : dump the unmerged entries before any add; stage the conflicted paths' worktree
 #           content, scoped to those paths only, so untracked, ignored, and unrelated changes
 #           never enter the chain (git add a path beforehand to include it deliberately);
@@ -967,6 +1029,15 @@ park_main() {
       "resolve the submodule pointers in the live merge, then re-run park"
   fi
 
+  # park writes the hangar by the worktree path .hangar/stages/<path>, and a link anywhere
+  # on it would carry the writes outside. In fresh mode no .hangar exists (every existing
+  # one was refused above), so the walk finds nothing.
+  : >"$td/linkpaths"
+  if [ "$NUNIQ" -gt 0 ]; then
+    printf '%s\0' "${PPATHS[@]}" >>"$td/linkpaths"
+  fi
+  refuse_stages_links "$td/linkpaths"
+
   # --- the carrier branch: created here ---
 
   # Every refusal above runs before this first mutation, and every hangar write happens on the
@@ -1082,6 +1153,53 @@ park_main() {
   echo "$APPLET: run 'git commit' to create the parked commit (--no-verify if a pre-commit hook rejects the conflict-marker content)"
 }
 
+# The index entry's mode at exactly <path>, into IDX_ENTRY_MODE, empty when the index holds
+# no entry there: the spec of a directory sweeps the paths under it, so the record's path is
+# matched exactly. A gitlink (160000) reaches the caller like any other mode; ce_mode_from_stat
+# keeps no mode of it.
+index_entry_mode() {
+  local p=$1 rec m
+  IDX_ENTRY_MODE=
+  git -C "$top" ls-files -s -z -- ":(literal)$p" >"$td/idxmode" ||
+    die "ls-files failed reading the index entry of $(quote_path "$p")"
+  while IFS= read -r -d '' rec || [ -n "$rec" ]; do
+    [ -n "$rec" ] || continue
+    [ "${rec#*$'\t'}" = "$p" ] || continue
+    m=${rec%%$'\t'*}
+    IDX_ENTRY_MODE=${m%% *}
+    break
+  done <"$td/idxmode"
+}
+
+# The mode git's own add records for the regular worktree file at <path>, into
+# RECORDED_MODE, ce_mode_from_stat's rules: core.symlinks false keeps a symlink index entry's
+# mode (a link checks out as a regular file holding the target), core.fileMode false keeps a
+# regular entry's mode and cannot read the exec bit at all (any other entry, or none, records
+# 100644), and otherwise the worktree file's own exec bit decides. Reads $smfalse and
+# $fmfalse, the caller's locals, so the configs are read once per run, not once per path.
+recorded_reg_mode() {
+  local p=$1 IDX_ENTRY_MODE
+  RECORDED_MODE=100644
+  if [ "$smfalse" = 1 ]; then
+    index_entry_mode "$p"
+    if [ "$IDX_ENTRY_MODE" = 120000 ]; then
+      RECORDED_MODE=120000
+      return
+    fi
+  fi
+  if [ "$fmfalse" = 1 ]; then
+    index_entry_mode "$p"
+    case $IDX_ENTRY_MODE in
+    100644 | 100755) RECORDED_MODE=$IDX_ENTRY_MODE ;;
+    *) RECORDED_MODE=100644 ;;
+    esac
+    return
+  fi
+  if [ -x "$top/$p" ]; then
+    RECORDED_MODE=100755
+  fi
+}
+
 # ==================================================================== unpark
 #
 # git unpark [<path>...]: take paths out of the hangar.
@@ -1096,31 +1214,38 @@ park_main() {
 #           meaning every held path) that selects every held path equal to it or nested under
 #           it, byte-exact: no globs, no pathspec magic. A path naming no held path is an error.
 #           Dirty checkouts are fine: the outcome compares the working directory by design.
-# Outcomes: the working file (clean-filtered, git hash-object) against file w's stored blob,
-#           and absent on both sides is a match. On a match, reopen: force-remove the path's
-#           stage-0 first (a stray stage-0 beside stages 1-3 makes git add fail to clear the
-#           entry), then feed 1/2/3 back with mode and sha from the hangar's tree entries. On a
-#           mismatch, no index state: the working directory is the resolution, left unstaged
-#           for review.
-#           Either way the stages directory is deleted from index and worktree; the removal is
-#           the record of release.
+# Outcomes: the working file (clean-filtered, git hash-object, and the mode git would
+#           record for it) against file w's stored blob and mode, and absent on both sides
+#           is a match. On a match, reopen: force-remove the path's stage-0 first (a stray
+#           stage-0 beside stages 1-3 makes git add fail to clear the entry), then feed
+#           1/2/3 back with mode and sha from the hangar's tree entries. On a mismatch, no
+#           index state: the working directory is the resolution, left unstaged for
+#           review. The mode is part of the file: a mode-only change (a chmod, a type
+#           change holding the same bytes) is a change, not an unchanged state.
+#           core.fileMode false and core.symlinks false are read the way git's own add
+#           reads them (ce_mode_from_stat), or a change git itself ignores would misreport.
+#           Either way the stages directory is deleted from index and worktree; the removal
+#           is the record of release.
 #
 # Refuses : HEAD not a parked chain (a staged, uncommitted park has its own refusal); any
 #           merge, rebase, cherry-pick, revert, or am in progress here; detached HEAD; a
 #           worktree .hangar that is missing or unreadable; a matched path hidden by a sparse
-#           checkout; no held paths (run land instead). A manifest first line that is not
-#           ours, at HEAD or in the worktree, dies: the hangar is not this tool's.
+#           checkout; a symlink or a non-directory standing on a matched path's stages
+#           directory (the release's rm -rf never traverses a link); no held paths (run land
+#           instead). A manifest first line that is not ours, at HEAD or in the worktree,
+#           dies: the hangar is not this tool's.
 
 unpark_main() {
   local cur i p rec r b reopened resolved incomplete review staged recorded
   local arg comp found j prefix w present worktree_sha frozen_sha outcome literal q summary
+  local worktree_mode frozen_mode fmfalse smfalse RECORDED_MODE
   local npspecs nstage nparked nmatch nhid nleft
   local nb nsp
   # The stage-tree records and the walk's outputs are local to this call through bash dynamic
   # scoping; the walk's header asks every caller to declare them local.
-  local SPAR SSTAGE SMODE SSHA PARKED PHAVE123 PWSHA
+  local SPAR SSTAGE SMODE SSHA PARKED PHAVE123 PWSHA PWMODE
   local BLOCKHEAD BLOCKNEXT BLOCKTAIL BLOCKSTART BLOCKEND PSTACK
-  local MATCHED M_OF_M MHAVE123 MWSHA NARGS REOPEN hidden RELSPEC LEFT
+  local MATCHED M_OF_M MHAVE123 MWSHA MWMODE NARGS REOPEN hidden RELSPEC LEFT
 
   PSPECS=()
   npspecs=0
@@ -1271,6 +1396,7 @@ unpark_main() {
         M_OF_M[nmatch]=$i
         MHAVE123[nmatch]=${PHAVE123[i]}
         MWSHA[nmatch]=${PWSHA[i]}
+        MWMODE[nmatch]=${PWMODE[i]}
         nmatch=$((nmatch + 1))
         break
       done
@@ -1282,6 +1408,7 @@ unpark_main() {
     M_OF_M=()
     MHAVE123=(${PHAVE123[@]+"${PHAVE123[@]}"})
     MWSHA=(${PWSHA[@]+"${PWSHA[@]}"})
+    MWMODE=(${PWMODE[@]+"${PWMODE[@]}"})
     for ((i = 0; i < nmatch; i++)); do
       M_OF_M[i]=$i
     done
@@ -1314,7 +1441,31 @@ unpark_main() {
     fi
   fi
 
+  # --- a symlink on a matched path's stages directory would carry the release outside ---
+  # The release removes the stages directories by their worktree paths, and the hangar's
+  # directories are real directories: a link (or a non-directory) standing on one is
+  # refused before anything is taken out, or the release's rm -rf would follow it out of
+  # the repository.
+  : >"$td/linkpaths"
+  if [ "$nmatch" -gt 0 ]; then
+    printf '%s\0' "${MATCHED[@]}" >>"$td/linkpaths"
+  fi
+  refuse_stages_links "$td/linkpaths"
+
   # --- outcomes ---
+  # The mode of a regular worktree file is read the way git's own add reads it
+  # (ce_mode_from_stat): core.fileMode false keeps the index entry's mode and cannot read
+  # the exec bit, and core.symlinks false keeps a symlink entry's mode for the regular
+  # file a link checks out as. Both configs are read once here; recorded_reg_mode reads
+  # the locals.
+  fmfalse=0
+  smfalse=0
+  if [ "$(git -C "$top" config --bool core.fileMode 2>/dev/null || true)" = false ]; then
+    fmfalse=1
+  fi
+  if [ "$(git -C "$top" config --bool core.symlinks 2>/dev/null || true)" = false ]; then
+    smfalse=1
+  fi
   : >"$td/feed"
   : >"$td/rmfeed"
   reopened=0
@@ -1333,16 +1484,23 @@ unpark_main() {
       incomplete=$((incomplete + 1))
     else
       frozen_sha=${MWSHA[$i]}
+      frozen_mode=${MWMODE[$i]}
       present=0
       if [ -e "$top/$p" ] || [ -L "$top/$p" ]; then present=1; fi
       worktree_sha=
+      worktree_mode=
       if [ "$present" = 1 ]; then
         if [ -L "$top/$p" ]; then
           # Symlinks take no filters: hash the readlink target verbatim (hash-object would follow
-          # the link; -n drops readlink's own trailing newline).
+          # the link; -n drops readlink's own trailing newline). The link's own mode is the
+          # recorded one whatever the parked file was: the type is structural, under every
+          # config.
           worktree_sha=$(readlink -n "$top/$p" | git -C "$top" hash-object --stdin)
+          worktree_mode=120000
         elif [ -f "$top/$p" ]; then
           worktree_sha=$(git -C "$top" hash-object -- "$p")
+          recorded_reg_mode "$p"
+          worktree_mode=$RECORDED_MODE
         fi
       fi
       if [ "$present" = 0 ]; then
@@ -1352,12 +1510,14 @@ unpark_main() {
           outcome='no file (resolved as a deletion)'
         fi
       else
+        # The blob alone is not the file: a mode-only change (a chmod, a type change holding
+        # the same bytes) is a change, and the working file, mode included, is the resolution.
         if [ -z "$worktree_sha" ]; then
           # Present but neither file nor symlink (a directory): the working tree is the resolution.
           outcome='differs (that content is the resolution)'
         elif [ -z "$frozen_sha" ]; then
           outcome='restored (that content is the resolution)'
-        elif [ "$worktree_sha" = "$frozen_sha" ]; then
+        elif [ "$worktree_sha" = "$frozen_sha" ] && [ "$worktree_mode" = "$frozen_mode" ]; then
           outcome='unchanged (reopened)'
         else
           outcome='differs (that content is the resolution)'
@@ -1850,17 +2010,18 @@ land_chain() {
 }
 
 # Held paths of a commit (stages directories holding 1/2/3) into HELD_PATHS, with each path's
-# file w blob in HELD_W, and w-only directories into WONLY_PATHS, in first-appearance order.
-# The read is lenient, for land only reports these records; unpark, which feeds them back
-# into the index, refuses a mangled hangar. The shared block walk classifies them: one pass,
-# each path once.
+# file w blob and mode in HELD_W and HELD_WM, and w-only directories into WONLY_PATHS, in
+# first-appearance order. The read is lenient, for land only reports these records; unpark,
+# which feeds them back into the index, refuses a mangled hangar. The shared block walk
+# classifies them: one pass, each path once.
 held_paths_of() {
   local c i
-  local SPAR SSTAGE SMODE SSHA nstage PARKED PHAVE123 PWSHA nparked
+  local SPAR SSTAGE SMODE SSHA nstage PARKED PHAVE123 PWSHA PWMODE nparked
   local BLOCKHEAD BLOCKNEXT BLOCKTAIL BLOCKSTART BLOCKEND nb PSTACK nsp
   c=$1
   HELD_PATHS=()
   HELD_W=()
+  HELD_WM=()
   WONLY_PATHS=()
   NHELD=0
   NWONLY=0
@@ -1870,6 +2031,7 @@ held_paths_of() {
     if [ "${PHAVE123[$i]}" = 1 ]; then
       HELD_PATHS[NHELD]=${PARKED[$i]}
       HELD_W[NHELD]=${PWSHA[$i]}
+      HELD_WM[NHELD]=${PWMODE[$i]}
       NHELD=$((NHELD + 1))
     else
       WONLY_PATHS[NWONLY]=${PARKED[$i]}
@@ -1880,24 +2042,41 @@ held_paths_of() {
 
 # Classify the held paths (set by held_paths_of) by what the chain tip carries, into FROZEN/NFRO
 # and RESOLVED/NRES, the caller's through dynamic scoping. This is unpark's outcome comparison
-# against the committed chain: the tip's object at the path vs the stored file w, and absent
-# == absent is a match. A match is still unchanged; a difference is a resolution already
-# committed, missing only its release. The worktree is never consulted: land works from the
-# chain.
+# against the committed chain: the tip's entry at the path, its blob and its mode, vs the stored
+# file w's blob and mode, and absent == absent is a match. A match is still unchanged. A
+# difference is a resolution already committed, missing only its release; a mode-only
+# resolution (a chmod, a type change on the same bytes) included, or it would be told to reopen
+# work it already carries. The worktree is never consulted: land works from the chain.
+#
+# ls-tree answers the entry in one call per held path: the literal prefix is the one magic
+# its mask accepts (it clears the wildcard flags besides, so a path holding glob bytes is
+# still a literal name), and a directory spec shows the directory's own entry, so the
+# record's path is matched exactly. Anything the file became instead of the blob w (a
+# directory 040000, a gitlink 160000) and an absent path both fall to RESOLVED, as no blob
+# w ever equaled their ids before them either.
 classify_held_paths() {
-  local tip=$1 i p wsha tsha
+  local tip=$1 i p rec tmode tsha path
   FROZEN=()
   RESOLVED=()
   NFRO=0
   NRES=0
   for ((i = 0; i < NHELD; i++)); do
     p=${HELD_PATHS[$i]}
-    wsha=${HELD_W[$i]}
-    # rev-parse reads the tip's object at the path, the same <rev>:<path> spelling the hangar
-    # reads use: a blob is its sha, anything the file became instead (a directory, a gitlink)
-    # is an id that no blob w can equal, and an absent path is empty.
-    tsha=$(git -C "$top" rev-parse -q --verify "$tip:$p" 2>/dev/null || true)
-    if [ "$tsha" = "$wsha" ]; then
+    tmode=
+    tsha=
+    git -C "$top" ls-tree -z "$tip" -- ":(literal)$p" >"$td/tipentry" ||
+      die "ls-tree of $tip failed reading the entry of $(quote_path "$p")"
+    while IFS= read -r -d '' rec || [ -n "$rec" ]; do
+      [ -n "$rec" ] || continue
+      path=${rec#*$'\t'}
+      [ "$path" = "$p" ] || continue
+      tmode=${rec%%$'\t'*}
+      tsha=${tmode#* }
+      tsha=${tsha##* }
+      tmode=${tmode%% *}
+      break
+    done <"$td/tipentry"
+    if [ "$tsha" = "${HELD_W[$i]}" ] && [ "$tmode" = "${HELD_WM[$i]}" ]; then
       FROZEN[NFRO]=$p
       NFRO=$((NFRO + 1))
     else

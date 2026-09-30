@@ -157,6 +157,30 @@ complete_chain() {
   assert_output --partial "prepared the landing on main"
 }
 
+@test "case 3: a mode-only resolution already committed is missing only the release" {
+  # the usual forgetting point, mode edition: chmod resolved the file, added, committed,
+  # the release never run. The tip carries the same blob as w with a different mode, so it
+  # is a resolution already committed, not an unchanged state to reopen
+  parked_chain l13m2 lb
+  chmod 755 f.txt
+  git add f.txt
+  git commit -qm "resolve by mode only"
+  run git land main
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "already resolved but not released: f.txt"
+  case $output in
+  *"still unchanged"*) fail "a mode-only resolution was reported as unchanged" ;;
+  esac
+  git rm -q -r .hangar/stages/f.txt
+  git commit -qm release
+  run git land main
+  assert_success
+  git commit -qm finished
+  [ "$(git ls-tree main -- f.txt | awk '{print $1}')" = "100755" ] ||
+    fail "the landed tree lost the resolution's mode"
+}
+
 @test "case 3: mixed held paths are reported one line per group, each with its recovery" {
   mkrepo l13m
   printf 'a\nb\nc\n' >f.txt

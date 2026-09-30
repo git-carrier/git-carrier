@@ -500,6 +500,46 @@ STAGED ON PURPOSE" ] || fail "a deliberately staged change was not carried into 
   assert_output --partial "touch"
 }
 
+@test "a symlink standing on a stages path is refused before the re-park writes through it" {
+  # park writes the hangar by the worktree path .hangar/stages/<path>: a link anywhere on
+  # it would carry the writes outside the repository, so the re-park refuses it before
+  # anything moves
+  mkrepo sy1
+  printf 'a\nb\nc\n' >f.txt
+  printf 'x\ny\n' >g.txt
+  git add -A && git commit -qm base
+  git branch side
+  printf 'a\nOURS\nc\n' >f.txt
+  printf 'x\nOURS\n' >g.txt
+  git add -A && git commit -qm ours
+  git checkout -q side
+  printf 'a\nTHEIRS\nc\n' >f.txt
+  printf 'x\nTHEIRS\n' >g.txt
+  git add -A && git commit -qm theirs
+  git checkout -q main
+  git merge side >/dev/null 2>&1 || true
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  git unpark f.txt >/dev/null # the reopened f.txt is the re-park's subject; g.txt stays held
+  mkdir -p "$CARRIER_WORK/outside/f.txt"
+  printf 'precious\n' >"$CARRIER_WORK/outside/f.txt/keeper"
+  mv .hangar/stages .hangar/stages-aside
+  ln -s "$CARRIER_WORK/outside" .hangar/stages
+  run git park
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "symlink"
+  assert_output --partial "git checkout -- .hangar/stages"
+  # the refused re-park wrote nothing through the link: outside is untouched
+  [ ! -e "$CARRIER_WORK/outside/f.txt/1" ] ||
+    fail "the re-park wrote a stage file outside the repository"
+  [ "$(cat "$CARRIER_WORK/outside/f.txt/keeper")" = "precious" ] ||
+    fail "the refused re-park disturbed a file outside the repository"
+  # nothing moved: the reopened conflict still stands
+  [ -n "$(git ls-files --unmerged -- f.txt)" ] ||
+    fail "the refused re-park disturbed the reopened conflict"
+}
+
 @test "the format line: a greater major refuses with the upgrade, anything else dies" {
   conflict_repo m14
   mkdir .hangar

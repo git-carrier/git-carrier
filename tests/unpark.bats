@@ -71,6 +71,115 @@ outcome_repo() {
   assert_output --partial "1 resolution already committed: commit the hangar release"
 }
 
+@test "a mode-only change is the resolution: the comparison covers the mode, not just the bytes" {
+  conflict_repo sy5
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  chmod 755 f.txt
+  run git unpark f.txt
+  assert_success
+  assert_output --partial "differs (that content is the resolution): f.txt"
+  assert_output --partial "1 resolution is unstaged for review"
+  [ -z "$(git ls-files --unmerged)" ] ||
+    fail "a mode-only change must not reopen the conflict"
+  git add f.txt && git commit -qm resolve
+  git land main >/dev/null
+  git commit -qm finished
+  [ "$(git ls-tree main -- f.txt | awk '{print $1}')" = "100755" ] ||
+    fail "the landed tree lost the resolution's mode"
+}
+
+@test "a type change holding the same blob bytes is the resolution, not an unchanged reopen" {
+  # w is a regular file; the worktree file became a symlink holding the same bytes: the
+  # blob matches, the mode does not
+  conflict_repo sy6
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  local content
+  content=$(git cat-file blob HEAD:f.txt && printf x)
+  rm f.txt
+  ln -s -- "${content%x}" f.txt
+  run git unpark f.txt
+  assert_success
+  assert_output --partial "differs (that content is the resolution): f.txt"
+  [ -z "$(git ls-files --unmerged)" ] ||
+    fail "a type change must not reopen the conflict"
+
+  # the reverse: w is a symlink, the worktree link became a regular file with the target
+  # bytes
+  mkrepo sy6b
+  printf 't\n' >t.txt
+  ln -s t.txt link.txt
+  git add -A && git commit -qm base
+  git branch side
+  rm link.txt && ln -s ours link.txt && git add -A && git commit -qm ours
+  git checkout -q side
+  rm link.txt && ln -s theirs link.txt && git add -A && git commit -qm theirs
+  git checkout -q main
+  git merge side >/dev/null 2>&1 || true
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  rm link.txt
+  printf 'ours' >link.txt
+  run git unpark link.txt
+  assert_success
+  assert_output --partial "differs (that content is the resolution): link.txt"
+  [ -z "$(git ls-files --unmerged -- link.txt)" ] ||
+    fail "a type change must not reopen the conflict"
+}
+
+@test "core.fileMode false: the exec bit stays out of the comparison, as git's own add keeps it" {
+  conflict_repo sy7
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  git config core.fileMode false
+  chmod 755 f.txt
+  run git unpark f.txt
+  assert_success
+  assert_output --partial "unchanged (reopened): f.txt"
+  [ -n "$(git ls-files --unmerged -- f.txt)" ] ||
+    fail "fileMode=false must keep the exec bit out of the comparison"
+}
+
+@test "core.symlinks false: a symlink checked out as a regular file still compares whole" {
+  # w is a symlink (mode 120000); a symlink-less checkout materializes it as a regular file
+  # holding the target text. git's own add keeps the index entry's 120000 for that file
+  # (ce_mode_from_stat), so the untouched file is unchanged, not a type change
+  mkrepo sy8
+  printf 't\n' >t.txt
+  ln -s t.txt link.txt
+  git add -A && git commit -qm base
+  git branch side
+  rm link.txt && ln -s ours link.txt && git add -A && git commit -qm ours
+  git checkout -q side
+  rm link.txt && ln -s theirs link.txt && git add -A && git commit -qm theirs
+  git checkout -q main
+  git merge side >/dev/null 2>&1 || true
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  # the symlink-less checkout: the parked link materializes as a regular file holding the
+  # target text
+  git config core.symlinks false
+  rm link.txt
+  git checkout -q -- link.txt
+  { [ -f link.txt ] && [ ! -L link.txt ]; } ||
+    fail "core.symlinks false did not materialize the link as a regular file"
+  run git unpark link.txt
+  assert_success
+  assert_output --partial "unchanged (reopened): link.txt"
+  [ -n "$(git ls-files --unmerged -- link.txt)" ] ||
+    fail "symlinks=false must keep the symlink mode in the comparison"
+
+  # editing the regular file is a content change: the kept mode does not force a reopen
+  git park >/dev/null
+  printf 'mine\n' >link.txt
+  run git unpark link.txt
+  assert_success
+  assert_output --partial "differs (that content is the resolution): link.txt"
+  [ -z "$(git ls-files --unmerged -- link.txt)" ] ||
+    fail "an edited file must not reopen the conflict"
+}
+
 @test "an unchanged reopen feeds stages 1/2/3 with no stray stage-0" {
   outcome_repo u2
   git unpark v1.txt >/dev/null
@@ -843,6 +952,84 @@ paths_repo() {
   [ "$status" -eq 2 ]
   assert_output --partial "missing or unreadable"
   assert_output --partial "git checkout -- .hangar"
+}
+
+@test "a symlink in place of the whole stages directory is refused before the release removes anything" {
+  # the release's rm -rf works by the worktree path .hangar/stages/<path>: a link anywhere
+  # on it would carry the removal outside the repository
+  conflict_repo sy2
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  mkdir -p "$CARRIER_WORK/outside/f.txt"
+  printf 'precious\n' >"$CARRIER_WORK/outside/f.txt/keeper"
+  mv .hangar/stages .hangar/stages-aside
+  ln -s "$CARRIER_WORK/outside" .hangar/stages
+  run git unpark -- f.txt
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "symlink"
+  assert_output --partial "git checkout -- .hangar/stages"
+  # the file outside the repository survived the refusal, and nothing was taken out
+  [ -f "$CARRIER_WORK/outside/f.txt/keeper" ] ||
+    fail "the release removed a file outside the repository"
+  [ -n "$(git ls-files -- .hangar/stages)" ] ||
+    fail "the refused unpark took the path out of the hangar"
+  [ -z "$(git ls-files --unmerged)" ] ||
+    fail "the refused unpark reopened the conflict"
+}
+
+@test "a symlink on a nested stages path is refused the same way" {
+  # the held path sub/f.txt crosses .hangar/stages/sub: a link there would carry the
+  # release's rm -rf outside the repository just the same
+  mkrepo sy3
+  mkdir sub
+  printf 'a\nb\nc\n' >sub/f.txt
+  printf 'keep\n' >keep.txt
+  git add -A && git commit -qm base
+  git branch side
+  printf 'a\nOURS\nc\n' >sub/f.txt
+  git add -A && git commit -qm ours
+  git checkout -q side
+  printf 'a\nTHEIRS\nc\n' >sub/f.txt
+  git add -A && git commit -qm theirs
+  git checkout -q main
+  git merge side >/dev/null 2>&1 || true
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  mkdir -p "$CARRIER_WORK/outside/f.txt"
+  printf 'precious\n' >"$CARRIER_WORK/outside/f.txt/keeper"
+  mv .hangar/stages/sub .hangar/sub-aside
+  ln -s "$CARRIER_WORK/outside" .hangar/stages/sub
+  run git unpark -- sub/f.txt
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "symlink"
+  [ -f "$CARRIER_WORK/outside/f.txt/keeper" ] ||
+    fail "the release removed a file outside the repository"
+  [ -n "$(git ls-files -- .hangar/stages)" ] ||
+    fail "the refused unpark took the path out of the hangar"
+  [ -z "$(git ls-files --unmerged)" ] ||
+    fail "the refused unpark reopened the conflict"
+}
+
+@test "a symlink in place of a path's own stages directory is refused too" {
+  conflict_repo sy4
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  mkdir -p "$CARRIER_WORK/outside"
+  printf 'precious\n' >"$CARRIER_WORK/outside/keeper"
+  mv .hangar/stages/f.txt .hangar/f.txt-aside
+  ln -s "$CARRIER_WORK/outside" .hangar/stages/f.txt
+  run git unpark -- f.txt
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "symlink"
+  # rm -rf of the link itself unlinks only the link, outside nothing to lose: the refusal
+  # is the contract either way, every component of the hangar's own path a real directory
+  [ -f "$CARRIER_WORK/outside/keeper" ] ||
+    fail "the release reached a file outside the repository"
+  [ -n "$(git ls-files -- .hangar/stages)" ] ||
+    fail "the refused unpark took the path out of the hangar"
 }
 
 @test "the uncommitted park window is refused, not reported as a missing chain" {

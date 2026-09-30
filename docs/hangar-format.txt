@@ -133,7 +133,9 @@ a merge that stops on one.
 File w is the working file as the index would stage it when the hangar was
 written: its clean-filtered content. No w file means the working file did not
 exist then. A reader hashes a later working file the same way to compare it
-against w.
+against w. A reader also compares the mode it would stage the file as against
+the entry's mode, so a mode-only change (an exec bit, a type change on the
+same bytes) is a change.
 
 A stages/<path>/ directory holding w and none of 1, 2 and 3 is an incomplete
 hangar, not a corrupt one. The likely cause is a manual edit that removed the
