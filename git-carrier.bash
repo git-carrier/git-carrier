@@ -85,7 +85,7 @@ EOF
     ;;
   land)
     cat <<'EOF'
-usage: git land [--check] <dst>
+usage: git land [--amend] [--check] <dst>
 
 Prepare the parked merge at HEAD for landing on <dst>. Each path still held in
 the hangar is reported, and land refuses until every one is released. A merge
@@ -95,6 +95,8 @@ switches to <dst>, stages the resolutions, and writes MERGE_HEAD; then run
 
     <dst>                an existing local branch to merge into; never the
                          carrier branch (the one the parked merge is on)
+    --amend              land over this carrier's earlier merge at <dst>'s
+                         tip, replacing it
     --check              report merge readiness without changing anything:
                          which paths are still held, whether the merge already
                          landed, or that it is ready to land
@@ -318,7 +320,7 @@ park_staged_uncommitted() {
 refuse_park_window() {
   printf '%s: %s\n' "$APPLET" "the hangar is staged but not committed; park never commits." >&2
   printf '%s: recover: %s\n' "$APPLET" "continue with 'git commit' (--no-verify if a hook rejects conflict markers)" >&2
-  printf '%s: or unwind: %s\n' "$APPLET" "'git reset --hard && rm -rf $HANGAR', then 'git switch <branch> && git branch -D <carrier>'" >&2
+  printf '%s: or unwind: %s\n' "$APPLET" "'git reset --merge && rm -rf $HANGAR', then 'git switch <branch> && git branch -D <carrier>'" >&2
   exit 2
 }
 
@@ -1668,7 +1670,7 @@ prune_stages_dirs() {
 
 # ====================================================================== land
 #
-# git land [--check] <dst>: check or land the chain at HEAD onto <dst>.
+# git land [--amend] [--check] <dst>: check or land the chain at HEAD onto <dst>.
 #
 # The chain comes from HEAD; the destination is always named and never recorded: at landing time
 # it may not exist in that clone, may point elsewhere, or may have been renamed. Nothing in the
@@ -1676,57 +1678,67 @@ prune_stages_dirs() {
 # hangar means the same thing in every clone. The source is recorded as an id for the same reason
 # ("a branch can move; the source must be immutable").
 #
-# States recognized, in the order checked:
-#   1. a live MERGE_HEAD here is always the user's own (land never starts one before
-#      returning): land refuses and leaves the final `git commit` / `git merge --continue` to
-#      the user.
-#   1b. local-state guards, before any case below can move a ref: an unfinished
-#      rebase/cherry-pick/revert/am, and a staged, uncommitted park (no case below is safe
-#      over it, and the state is the user's to finish either way).
-#   2. HEAD is not a parked chain: a refusal naming the switch onto the chain branch. A manifest
-#      first line that is not ours dies first: the hangar is not this tool's. The landing always
-#      runs from the chain's own branch, never from the destination; after a landing, running
-#      from the destination lands here too, and "not a parked merge" is the correct answer.
-#   3. HEAD is a chain. Paths still held are reported per path with the recovery that fits
-#      (still unchanged: the git unpark hint; resolution already in the chain: only the
-#      release), exit 2. w-only directories are an incomplete hangar, exit 2. Complete: did
-#      this chain already land in <dst>? A landing is a merge in <dst> whose second parent is
-#      the recorded source and whose tree is the chain's resolved tree; a match is the
-#      no-op exit 0 wherever <dst> has gone since. No match: the landing is prepared, and
-#      the user's own `git commit` finishes it. (Ancestry was the wrong question: it survives a
-#      revert, so a release reaching <dst> another way would strand an unfinished chain at
-#      exit 0 forever; the tree is the chain's own answer.)
+# Every landing works from two records read out of the chain. The base is the first-parent walk
+# from the chain tip to the first tree without the format line, the commit every landing starts
+# from. The resolved tree is a chain commit's tree minus .hangar (ls-tree into mktree), built per
+# chain commit; a landing stages the resolved tree of the chain commit that was the tip at
+# landing time. The resolved trees are the only content inspected: a released path still carrying
+# its conflict markers lands verbatim, because plain git commits such content.
 #
-# --check runs every readiness check but exits before a ref, index, or worktree change. It is
-# also the status query for a carrier: every not-ready refusal below is the per-path
-# what-remains report, and the ready line names the landing's positions.
-#
-# Landing machinery, shared by every landing. The base commit is the first-parent walk from the
-# chain tip to the first tree without the format line. The resolved tree is the tip tree minus
-# .hangar (ls-tree into mktree). The worktree-collision check refuses an untracked or ignored
-# worktree file at a path the resolved tree tracks. The clean-checkout check requires tracked
-# content clean where the landing starts. The dst-position check allows <dst> at or behind the
-# base commit, at the chain tip, or at a previous landing of this source (dst^2); a landing
-# over a previous landing supersedes it and names it. Past every position <dst> holds work a
-# landing may not keep, and the rebase or the reset is the user's own move, never the
-# landing's. Content is never inspected: a released path still carrying its conflict markers
-# lands verbatim, because plain git commits such content. The move is git switch -C, porcelain
-# on purpose; a branch checked out in another worktree is checked by the tool itself first,
-# because the porcelain refusals for it are version-dependent.
-#
-# The sequence leaves the state an ordinary resolved merge leaves: on <dst> at the base commit,
-# resolutions staged, MERGE_HEAD written, "All conflicts fixed but you are still merging".
-# The user's plain `git commit` records [base, source] with editor, hooks, signing, and
-# mergetag all their own. The escape is `git merge --abort` or `git reset --hard`. An editor
-# quit or hook failure stays in the prepared state; plain `git commit` finishes later.
+# Subject : a parked chain at HEAD, and <dst>, an existing local branch, never the carrier
+#           branch (the one the parked merge is on). The landing always runs from the chain's own
+#           branch, never from the destination: after a landing, the destination is no parked
+#           chain, and land's "not a parked merge" refusal there is the correct answer.
+# Refuses : in the order checked: a live MERGE_HEAD here, always the user's own (land never
+#           starts one before returning), leaving the final `git commit` / `git merge --continue`
+#           to the user; an unfinished rebase/cherry-pick/revert/am, and a staged, uncommitted
+#           park (local-state guards, before any case below can move a ref: no case below is
+#           safe over them, and they are the user's to finish either way); HEAD not a parked
+#           chain (the refusal names the switch onto the chain branch; a manifest first line
+#           that is not ours dies first: the hangar is not this tool's); paths still held,
+#           reported per path with the recovery that fits (still unchanged: the git unpark
+#           hint; resolution already in the chain: only the release), exit 2; w-only
+#           directories, an incomplete hangar, exit 2; a worktree file, untracked or ignored,
+#           standing on a path the resolved tree tracks; tracked changes in the checkout where
+#           the landing starts; and <dst> at any position but at or behind the base, at the
+#           chain tip, or, with --amend, at this chain's own earlier landing: every other
+#           position holds work a landing may not keep (another merge of the recorded source
+#           that is not one of this chain's landings included: which merge stands is not the
+#           landing's to guess), and the rebase or the reset is the user's own move, never the
+#           landing's.
+# No-op   : this chain already landed in <dst>, a merge whose second parent is the recorded
+#           source and whose tree is the resolved tree of the chain commit that was the tip at
+#           landing time; a match is exit 0 wherever <dst> has gone since. (Ancestry was the
+#           wrong question: it survives a revert, so a release reaching <dst> another way
+#           would strand an unfinished chain at exit 0 forever; the tree is the chain's own
+#           answer.)
+# --amend : lands over this carrier's previous merge at <dst>'s tip, replacing it. The earlier
+#           landing is recognized like the no-op, but against the whole chain: <dst>'s tip is
+#           a merge whose second parent is the recorded source and whose tree is one of the
+#           chain's own resolved trees, a state the chain has moved past. The landing amends
+#           the earlier one, a forced update that names the range and warns where the earlier
+#           landing went.
+# --check : runs every readiness check but exits before a ref, index, or worktree change. It
+#           is also the status query for a carrier: every not-ready refusal is the per-path
+#           what-remains report, and the ready line names the landing's positions.
+# Effect  : the move onto <dst> is git switch -C, porcelain on purpose; a branch checked out
+#           in another worktree is checked by the tool itself first, because the porcelain
+#           refusals for it are version-dependent. The sequence leaves the state an ordinary
+#           resolved merge leaves: on <dst> at the base commit, resolutions staged, MERGE_HEAD
+#           written, "All conflicts fixed but you are still merging". Land never commits:
+#           the user's plain `git commit` records [base, source] with editor, hooks, signing,
+#           and mergetag all their own. The escape is `git merge --abort` or `git reset
+#           --hard`. An editor quit or hook failure stays in the prepared state; plain
+#           `git commit` finishes later.
 
 land_main() {
-  local dst check endopts
+  local dst check amend endopts
   local cur mh live heads i
   local chain_tip srcv scc srcdesc
   local MSRC MSRCDESC
   dst=
   check=0
+  amend=0
   endopts=0
   while [ $# -gt 0 ]; do
     if [ "$endopts" = 0 ]; then
@@ -1739,6 +1751,11 @@ land_main() {
       --version) show_version ;;
       --)
         endopts=1
+        shift
+        continue
+        ;;
+      --amend)
+        amend=1
         shift
         continue
         ;;
@@ -1841,11 +1858,11 @@ land_main() {
 
 # A complete chain at HEAD: land it onto <dst>. land_main's locals are in scope here through
 # bash dynamic scoping: chain_tip (the chain's tip commit), srcv (its recorded source id), scc
-# (the source's peel), srcdesc (its recorded description), cur (the chain's branch), dst, and
-# check.
+# (the source's peel), srcdesc (its recorded description), cur (the chain's branch), dst,
+# check, and amend.
 land_chain() {
-  local rec rest dirty epath extra
-  local base resolved_tree dst_tip p2 supersedes
+  local rec rest dirty extra
+  local base resolved_tree dst_tip p2 amended where
   local i FROZEN RESOLVED NFRO NRES
 
   # --- held-paths check ---
@@ -1891,16 +1908,8 @@ land_chain() {
   done
 
   # --- the resolved tree: the tip tree minus .hangar ---
-  git -C "$top" ls-tree -z "$chain_tip" >"$td/entries" || die "ls-tree of the chain tip failed"
-  : >"$td/resolved"
-  while IFS= read -r -d '' rec || [ -n "$rec" ]; do
-    [ -n "$rec" ] || continue
-    epath=${rec#*$'\t'}
-    if [ "$epath" = "$HANGAR" ]; then continue; fi
-    printf '%s\0' "$rec" >>"$td/resolved"
-  done <"$td/entries"
-  resolved_tree=$(git -C "$top" mktree -z <"$td/resolved") ||
-    die "mktree failed building the resolved tree"
+  resolved_tree_of "$chain_tip"
+  resolved_tree=$RTREE
 
   # --- did this chain already land in <dst>? ---
   # This chain's landing is a merge in <dst> whose second parent is the recorded source and
@@ -1960,27 +1969,43 @@ land_chain() {
   # --- dst-position check ---
   dst_tip=$(git -C "$top" rev-parse "refs/heads/$dst")
   p2=$(git -C "$top" rev-parse -q --verify "$dst_tip^2" 2>/dev/null || true)
-  supersedes=0
+  amended=0
   if ! git -C "$top" merge-base --is-ancestor "$dst_tip" "$base" &&
-    [ "$dst_tip" != "$chain_tip" ] && [ "$p2" != "$scc" ]; then
-    refuse_recovery \
-      "$dst cannot move from $(short "$dst_tip"); it must be at or behind the base commit, at the merge work's tip, or at a previous landing of this source." \
-      "rebase the carrier onto it ('git switch $cur && git rebase $dst', under a new name if the carrier is shared), or reset it yourself ('git branch -f $dst $(short "$base")') and re-run; the reset tip remains reflog-reachable as $dst@{1}"
-  fi
-  if [ "$p2" = "$scc" ] && [ "$dst_tip" != "$chain_tip" ] &&
-    ! git -C "$top" merge-base --is-ancestor "$dst_tip" "$base"; then
-    supersedes=1
+    [ "$dst_tip" != "$chain_tip" ]; then
+    if [ "$p2" = "$scc" ] && is_our_landing "$dst_tip"; then
+      if [ "$amend" = 1 ]; then
+        amended=1
+      else
+        refuse_recovery \
+          "$dst's tip is this carrier's earlier landing ($(short "$dst_tip") \"$(git -C "$top" log -1 --format=%s "$dst_tip")\"); landing would amend it" \
+          "re-run with --amend"
+      fi
+    elif [ "$p2" = "$scc" ]; then
+      refuse_recovery \
+        "$dst's tip is a merge of $srcdesc ($(short "$dst_tip") \"$(git -C "$top" log -1 --format=%s "$dst_tip")\"); landing would replace it" \
+        "keep $dst's merge and do not land, or reset $dst and re-run"
+    else
+      refuse_recovery \
+        "$dst cannot fast-forward to the merge's base commit $(short "$base")" \
+        "rebase the carrier onto $dst, or reset $dst to $(short "$base"); then re-run"
+    fi
+  elif [ "$amend" = 1 ]; then
+    refuse "--amend: $dst's tip is not this carrier's earlier landing"
   fi
 
   # --- the landing ---
   # The sequence ends in git switch -C $dst, so refuse the move while $dst is checked out in
   # another worktree.
   refuse_dst_checked_out_elsewhere "$dst"
+  if [ "$amended" = 1 ]; then
+    where="(forced update $(short "$dst_tip")...$(short "$base"))"
+  elif [ "$dst_tip" != "$base" ] && git -C "$top" merge-base --is-ancestor "$dst_tip" "$base"; then
+    where="(fast-forward $(short "$dst_tip")..$(short "$base"))"
+  else
+    where="($(short "$base"))"
+  fi
   if [ "$check" = 1 ]; then
-    if [ "$supersedes" = 1 ]; then
-      echo "$APPLET: check: a landing supersedes $dst's previous landing $(short "$dst_tip"); it would remain reflog-reachable as $dst@{1}"
-    fi
-    echo "$APPLET: check: ready to land MERGE_HEAD ($(short "$srcv")) from $cur onto $dst ($(short "$base")); nothing changed"
+    echo "$APPLET: check: ready to land merge from $cur onto $dst $where"
     exit 0
   fi
   # Capture the switches' output and discard it on success: land's report is the only output.
@@ -2001,12 +2026,47 @@ land_chain() {
     refuse "git switch -C $dst was refused (message above); the checkout is back where it started; resolve what it names, then re-run"
   fi
   write_merge_state "$chain_tip" "$srcv" "$srcdesc"
-  if [ "$supersedes" = 1 ]; then
-    echo "$APPLET: superseded $dst's previous landing $(short "$dst_tip"): reflog-reachable as $dst@{1}"
+  echo "$APPLET: prepared the landing on $dst $where: resolutions staged, MERGE_HEAD written ($(short "$srcv"))"
+  if [ "$amended" = 1 ]; then
+    warn "$(short "$dst_tip") is a earlier landing of this parked merge; now recorded in the reflog as $dst@{1}"
   fi
-  echo "$APPLET: prepared the landing on $dst ($(short "$base")): resolutions staged, MERGE_HEAD written ($(short "$srcv"))"
   echo "$APPLET: the merge work stays on $cur; run 'git commit' to finish the merge"
   exit 0
+}
+
+# The resolved tree of $1: its tree minus the hangar, the tree a landing stages. Sets RTREE.
+resolved_tree_of() {
+  local c=$1 rec epath
+  git -C "$top" ls-tree -z "$c" >"$td/entries" || die "ls-tree of $(short "$c") failed"
+  : >"$td/resolved"
+  while IFS= read -r -d '' rec || [ -n "$rec" ]; do
+    [ -n "$rec" ] || continue
+    epath=${rec#*$'\t'}
+    if [ "$epath" = "$HANGAR" ]; then continue; fi
+    printf '%s\0' "$rec" >>"$td/resolved"
+  done <"$td/entries"
+  RTREE=$(git -C "$top" mktree -z <"$td/resolved") ||
+    die "mktree failed building the resolved tree of $(short "$c")"
+}
+
+# Is $1 this chain's own landing? A landing stages the chain's resolved tree, so its commit
+# tree equals the resolved tree of the chain commit that was the tip at landing time. Walks
+# the chain's commits, tip to park, matching $1's tree against each one's resolved tree; the
+# tip itself cannot match here (its match is the already-landed no-op before any of this), so
+# a match is a landing the chain has moved past. Content is the proof, not commit identity.
+# Returns 0 on a match, 1 on none. chain_tip is the caller's, through dynamic scoping.
+is_our_landing() {
+  local c want
+  want=$(git -C "$top" rev-parse -q --verify "$1^{tree}" 2>/dev/null) ||
+    die "cannot read the tree of $(short "$1")"
+  c=$chain_tip
+  while tree_has_hangar "$c"; do
+    resolved_tree_of "$c"
+    [ "$RTREE" = "$want" ] && return 0
+    c=$(git -C "$top" rev-parse -q --verify "$c^1" 2>/dev/null) ||
+      die "the merge work's history reaches past the repository root: every commit here carries the hangar; it cannot land"
+  done
+  return 1
 }
 
 # Held paths of a commit (stages directories holding 1/2/3) into HELD_PATHS, with each path's
@@ -2182,7 +2242,7 @@ git-unpark)
   ;;
 git-land)
   APPLET=land
-  USAGE='git land [--check] <dst>'
+  USAGE='git land [--amend] [--check] <dst>'
   land_main "$@"
   ;;
 *)

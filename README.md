@@ -88,7 +88,7 @@ Once every path is released, check that the merge is ready, then land and commit
 
 ```sh
 $ git land --check main
-land: check: ready to land MERGE_HEAD (4c8e07b) from carrier/v1.2.3 onto main (69a1f2c); nothing changed
+land: check: ready to land merge from carrier/v1.2.3 onto main (69a1f2c)
 
 $ git land main
 land: prepared the landing on main (69a1f2c): resolutions staged, MERGE_HEAD written (4c8e07b)

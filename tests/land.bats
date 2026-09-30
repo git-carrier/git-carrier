@@ -491,10 +491,12 @@ complete_chain() {
   assert_output --partial "this merge already landed"
 }
 
-@test "case 3: another chain's landing of the same source does not strand this chain" {
+@test "case 3: another merge of the same source on dst is refused; the user's move then lands" {
   # the regression the tree comparison exists for: the release reaching <dst> any other way used
   # to read as "already merged", exit 0, stranding this chain unfinished, because ancestry
-  # survives a revert.
+  # survives a revert. The colleague's differently-resolved landing is not one of this
+  # chain's landings either (its tree matches no chain state): which merge stands is not the
+  # landing's to guess, so it is refused like any other moved <dst>, --amend or not.
   complete_chain l9b lb
   printf 'a\nRESOLVED-OUR-WAY\nc\n' >f.txt
   git add f.txt && git commit -qm "resolve our way"
@@ -504,21 +506,40 @@ complete_chain() {
   git merge --no-edit -m "colleague: their landing" side >/dev/null 2>&1 || true
   [ "$(git rev-parse main^2)" = "$(git rev-parse side)" ] ||
     fail "fixture: the colleague's landing did not finish"
+  PREV=$(git rev-parse main)
   git checkout -q carrier/lb
-  # the colleague's landing is not this chain's landing (a different tree, so no match): the
-  # check names the landing it would supersede, the landing prepares over it superseding and
-  # naming the colleague's landing, and this chain's own resolutions finish
+  # the check names the colleague's merge, the choice a landing would replace, and refuses
   run git land --check main
-  assert_success
-  assert_output --partial "a landing supersedes main's previous landing"
-  assert_output --partial "check: ready to land MERGE_HEAD ($(git rev-parse --short "$SRC")) from carrier/lb onto main ($(git rev-parse --short "$O"))"
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "main's tip is a merge of"
+  assert_output --partial "colleague: their landing"
+  assert_output --partial "landing would replace it"
+  assert_output --partial "do not land"
+  assert_output --partial "reset main"
+  case $output in
+  *"already"*) fail "the colleague's landing still strands this chain at exit 0" ;;
+  *"forced update"*) fail "the check lands over a merge that is not this chain's: [$output]" ;;
+  esac
+  [ "$(git rev-parse main)" = "$PREV" ] || fail "the check moved main"
   run git land main
-  assert_success
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "main's tip is a merge of"
   case $output in
   *"already"*) fail "the colleague's landing still strands this chain at exit 0" ;;
   esac
-  assert_output --partial "superseded main's previous landing"
-  assert_output --partial "main@{1}"
+  [ "$(git rev-parse main)" = "$PREV" ] || fail "the refusal moved main"
+  # --amend is not a force flag: it lifts only the earlier-landing refusal
+  run git land --amend main
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "main's tip is a merge of"
+  [ "$(git rev-parse main)" = "$PREV" ] || fail "--amend moved main"
+  # the user's own move, keeping this chain's resolutions, then the landing
+  git branch -f main "$O"
+  run git land main
+  assert_success
   assert_output --partial "prepared the landing on main"
   git commit -qm "our landing after all"
   [ "$(git show main:f.txt)" = "a
@@ -543,9 +564,9 @@ c" ] || fail "this chain's resolutions did not land"
   case $output in
   *"already"*) fail "the colleague's landing still strands this chain at exit 0" ;;
   esac
-  assert_output --partial "cannot move from"
-  assert_output --partial "git rebase"
-  assert_output --partial "git branch -f main"
+  assert_output --partial "cannot fast-forward to the merge's base commit"
+  assert_output --partial "rebase the carrier onto main"
+  assert_output --partial "reset main to"
   # the user's own reset, the refusal's exact recipe, then the landing
   git branch -f main "$O"
   run git land main
@@ -554,6 +575,89 @@ c" ] || fail "this chain's resolutions did not land"
   [ "$(git show main:f.txt)" = "a
 RESOLVED-AGAIN
 c" ] || fail "this chain's resolutions did not land"
+}
+
+@test "case 3: this chain's own earlier landing at dst amends only with --amend" {
+  complete_chain l9d lb3
+  git land main >/dev/null
+  git commit -qm "first landing"
+  PREV=$(git rev-parse main)
+  PREVS=$(git rev-parse --short main)
+  # the chain moves on past the landed state: a later resolution amends the landed one
+  git checkout -q carrier/lb3
+  printf 'a\nRESOLVED-BETTER\nc\n' >f.txt
+  git add f.txt && git commit -qm "resolve better"
+  # without --amend, the check refuses over the chain's own earlier landing
+  run git land --check main
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "main's tip is this carrier's earlier landing"
+  assert_output --partial "landing would amend it"
+  assert_output --partial "re-run with --amend"
+  case $output in
+  *"already"*) fail "the chain's earlier landing misreads as the already-landed no-op" ;;
+  *"forced update"*) fail "the check amends the earlier landing without --amend: [$output]" ;;
+  esac
+  [ "$(git rev-parse main)" = "$PREV" ] || fail "the check moved main"
+  run git land main
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "main's tip is this carrier's earlier landing"
+  [ "$(git rev-parse main)" = "$PREV" ] || fail "the refusal moved main"
+  # with --amend, the check names the forced update, and nothing else
+  run git land --amend --check main
+  assert_success
+  assert_output --partial "check: ready to land merge from carrier/lb3 onto main (forced update $PREVS...$(git rev-parse --short "$O"))"
+  case $output in
+  *"reflog"*) fail "--check emits the landing's warning: [$output]" ;;
+  esac
+  [ "$(git rev-parse main)" = "$PREV" ] || fail "the check moved main"
+  # the landing amends the chain's own earlier landing, warning where it went
+  run git land --amend main
+  assert_success
+  assert_output --partial "prepared the landing on main (forced update $PREVS...$(git rev-parse --short "$O"))"
+  assert_output --partial "warning: $PREVS is a earlier landing of this parked merge; now recorded in the reflog as main@{1}"
+  assert_prepared main "$O" "$SRC" "$(git rev-parse carrier/lb3)" "commit '$SRC'"
+  [ "$(git rev-parse 'main@{1}')" = "$PREV" ] ||
+    fail "the earlier landing is not recorded in the reflog as main@{1}"
+  git commit -qm "second landing"
+  [ "$(git show main:f.txt)" = "a
+RESOLVED-BETTER
+c" ] || fail "the second landing did not record the later resolution"
+  [ "$(git rev-parse main^1)" = "$O" ] || fail "the second landing's first parent is not O"
+  [ "$(git rev-parse main^2)" = "$SRC" ] ||
+    fail "the second landing's second parent is not the source"
+}
+
+@test "land --amend is refused when dst's tip is not this carrier's earlier landing" {
+  complete_chain l9d lb3
+  run git land --amend main
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "--amend: main's tip is not this carrier's earlier landing"
+  case $output in
+  *"forced update"*) fail "--amend forced a plain landing: [$output]" ;;
+  esac
+  [ "$(git rev-parse main)" = "$O" ] || fail "the refusal moved main"
+  # --check runs the same refusal: the check reports the run it would make
+  run git land --amend --check main
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "--amend: main's tip is not this carrier's earlier landing"
+}
+
+@test "land --amend over the chain's current landing is the already-landed no-op" {
+  complete_chain l9d lb3
+  git land main >/dev/null
+  git commit -qm "first landing"
+  git checkout -q carrier/lb3
+  # the chain is still current at the landed state: there is nothing to amend
+  run git land --amend main
+  assert_success
+  assert_output --partial "this merge already landed"
+  case $output in
+  *"forced update"*) fail "--amend forced a no-op: [$output]" ;;
+  esac
 }
 
 @test "case 3 complete: the landing is prepared from the carrier branch" {
@@ -616,8 +720,13 @@ c" ] || fail "this chain's resolutions did not land"
   complete_chain l22 lb
   BASE=$(git rev-parse "$O~1")
   git branch -f main "$BASE"
+  run git land --check main
+  assert_success
+  assert_output --partial "check: ready to land merge from carrier/lb onto main (fast-forward $(git rev-parse --short "$BASE")..$(git rev-parse --short "$O"))"
+  [ "$(git rev-parse main)" = "$BASE" ] || fail "the check moved main"
   run git land main
   assert_success
+  assert_output --partial "prepared the landing on main (fast-forward $(git rev-parse --short "$BASE")..$(git rev-parse --short "$O"))"
   assert_prepared main "$O" "$SRC" "$(git rev-parse carrier/lb)" "commit '$SRC'"
 }
 
@@ -669,10 +778,9 @@ c" ] || fail "this chain's resolutions did not land"
   run git land main
   assert_failure
   [ "$status" -eq 2 ]
-  assert_output --partial "cannot move from"
-  assert_output --partial "git rebase"
-  assert_output --partial "git branch -f main"
-  assert_output --partial "the reset tip remains reflog-reachable as main@{1}"
+  assert_output --partial "cannot fast-forward to the merge's base commit $(git rev-parse --short "$O")"
+  assert_output --partial "rebase the carrier onto main"
+  assert_output --partial "reset main to"
   # the user's own reset, the refusal's exact recipe, then the landing
   git branch -f main "$O"
   run git land main
@@ -688,8 +796,7 @@ c" ] || fail "this chain's resolutions did not land"
   TIP=$(git rev-parse HEAD)
   run git land --check main
   assert_success
-  assert_output --partial "check: ready to land MERGE_HEAD ($(git rev-parse --short "$SRC")) from carrier/lb onto main ($(git rev-parse --short "$O"))"
-  assert_output --partial "nothing changed"
+  assert_output --partial "check: ready to land merge from carrier/lb onto main ($(git rev-parse --short "$O"))"
   [ "$(git rev-parse main)" = "$MAIN" ] || fail "the check moved main"
   [ "$(git rev-parse HEAD)" = "$TIP" ] || fail "the check moved HEAD"
   [ -z "$(git status --porcelain)" ] || fail "the check dirtied the checkout"
@@ -722,9 +829,9 @@ c" ] || fail "this chain's resolutions did not land"
   run git land --check main
   assert_failure
   [ "$status" -eq 2 ]
-  assert_output --partial "cannot move from"
-  assert_output --partial "git rebase"
-  assert_output --partial "git branch -f main"
+  assert_output --partial "cannot fast-forward to the merge's base commit"
+  assert_output --partial "rebase the carrier onto main"
+  assert_output --partial "reset main to"
   [ "$(git rev-parse main)" = "$MOVED" ] || fail "the check moved main"
   [ -z "$(git status --porcelain)" ] || fail "the check dirtied the checkout"
 }

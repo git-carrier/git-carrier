@@ -808,19 +808,74 @@ EOF
   assert_output --partial "staged but not committed"
   assert_output --partial "git commit"
   assert_output --partial "--no-verify"
-  assert_output --partial "git reset --hard"
+  assert_output --partial "git reset --merge"
 }
 
 @test "the park window's named unwind leaves an ordinary repository" {
   conflict_repo m32
   git park -b carrier/side >/dev/null
-  git reset -q --hard
+  git reset -q --merge
   rm -rf .hangar
+  git switch -q main
+  git branch -D carrier/side >/dev/null
+  [ "$(git symbolic-ref --short HEAD)" = "main" ] || fail "the unwind left HEAD on the carrier"
+  [ -z "$(git branch --list carrier/side)" ] || fail "the unwind left the carrier branch behind"
   [ -z "$(git status --porcelain)" ] || fail "the unwind did not leave a clean checkout"
   run git park
   assert_failure
   [ "$status" -eq 2 ]
   assert_output --partial "no stopped merge here"
+}
+
+@test "the park window's named unwind keeps the unrelated unstaged work park kept out" {
+  conflict_repo m33
+  # park leaves an unrelated unstaged change out of the chain by design; the unwind it names
+  # must not destroy what park preserved (reset --hard would)
+  printf 'UNSTAGED WIP\n' >>keep.txt
+  git park -b carrier/side >/dev/null
+  git reset -q --merge
+  rm -rf .hangar
+  git switch -q main
+  git branch -D carrier/side >/dev/null
+  [ "$(cat keep.txt)" = "keep
+UNSTAGED WIP" ] || fail "the unwind destroyed the unrelated unstaged work"
+  [ "$(cat f.txt)" = "a
+OURS
+c" ] || fail "the unwind left the conflicted path carrying merge content"
+  [ "$(git status --porcelain)" = " M keep.txt" ] ||
+    fail "the unwind left more than the unstaged work behind: [$(git status --porcelain)]"
+}
+
+@test "the named unwind refuses, destroying nothing, over a merge path with an unstaged edit" {
+  matrix_repo m37
+  git park -b carrier/v1.2.3 >/dev/null
+  # s0.txt was resolved by its mid-merge add and re-edited after: staged merge content with an
+  # unstaged edit on top, the state reset --merge refuses (git merge --abort refuses the same
+  # state on a live merge). The refusal must leave the window exactly as it stood
+  [ "$(git status --porcelain -- s0.txt)" = "MM s0.txt" ] ||
+    fail "fixture: s0.txt is not staged merge content with an unstaged edit"
+  run git reset --merge
+  assert_failure
+  [ "$(git status --porcelain -- s0.txt)" = "MM s0.txt" ] ||
+    fail "the refused unwind disturbed the re-edited path"
+  [ "$(cat s0.txt)" = "s0-EDITED" ] || fail "the refused unwind destroyed the unstaged re-edit"
+  git ls-files --cached --error-unmatch -- .hangar/manifest >/dev/null ||
+    fail "the refused unwind unstaged the hangar"
+  [ "$(git symbolic-ref --short HEAD)" = "carrier/v1.2.3" ] ||
+    fail "the refused unwind moved HEAD"
+  # the escape git's own refusal leaves: save the edit outside, drop it from the checkout,
+  # unwind, put it back
+  cp s0.txt "$CARRIER_WORK/s0-EDITED"
+  git checkout -q -- s0.txt
+  git reset -q --merge
+  rm -rf .hangar
+  git switch -q main
+  git branch -D carrier/v1.2.3 >/dev/null
+  cp "$CARRIER_WORK/s0-EDITED" s0.txt
+  [ "$(cat s0.txt)" = "s0-EDITED" ] || fail "the saved edit did not come back"
+  [ "$(git status --porcelain)" = " M s0.txt
+?? new.txt" ] ||
+    fail "the unwind left more than the saved edit behind: [$(git status --porcelain)]"
 }
 
 @test "a chain tip with a mangled or incomplete manifest is named at the re-park" {

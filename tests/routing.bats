@@ -47,7 +47,7 @@ teardown() {
   esac
   run git-land -h
   [ "$status" -eq 129 ]
-  assert_output --partial "usage: git land [--check] <dst>"
+  assert_output --partial "usage: git land [--amend] [--check] <dst>"
 }
 
 @test "a direct run prints the applet list and the install hint, exit 129" {
