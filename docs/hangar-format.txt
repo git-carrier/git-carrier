@@ -1,0 +1,182 @@
+SPDX-License-Identifier: CC0-1.0
+
+The hangar format (format 1)
+============================
+
+A hangar is a subtree at the root of a commit's tree that carries a merge stopped
+by conflicts (the unmerged stages, the working files, the merge's source), so that
+the state travels as ordinary commits, clones and pushes. It never lands: the tree
+that finishes the merge is the tree that carried the hangar, minus .hangar.
+
+The format is host-independent. It holds object ids, blobs and bytes. No reference
+name is ever resolved from the data, and no destination is ever recorded, so every
+byte of a hangar means the same thing in every clone.
+
+The tree
+--------
+
+    .hangar/
+      manifest          the record, see below
+      README            prose for whoever opens the directory; optional
+      .gitattributes    the transit guarantee, see Transit
+      message           the recorded merge message, when there is one
+      stages/           the payload, when there is one
+        <path>/         one directory per held path, and one per path above it
+          1             stage 1, base; absent = that side has no entry
+          2             stage 2, ours
+          3             stage 3, theirs
+          w             the working file when the hangar was written; absent = no file
+
+.hangar is the format's name, fixed and case-sensitive, and it exists only at
+the root of a commit's tree. A writer produces exactly the entries above, the
+README alone excepted: nothing machine ever reads it. A reader ignores
+unrecognized entries inside .hangar itself and interprets everything under
+stages/ strictly; there an unknown file would corrupt the record.
+
+stages/ is optional: absent means none. An empty chain (a merge that stopped with
+nothing unmerged) is valid and carries no stages/ entries at all.
+
+The manifest
+------------
+
+One machine-written file. Line 1 is the format line, the rest are fields, one per
+line:
+
+    manifest    = format-line LF field-line *(LF field-line) [LF]
+    format-line = "hangar-format: " major
+    major       = digit-1-9 *DIGIT
+    field-line  = field-name ":" [SP] field-value
+    field-name  = lcalnum *( lcalnum / "-" )
+    field-value = *any-except-lf
+
+    hangar-format: 1
+    source: 4c8e07bd01f2e39a6a1d5d3b8c0f7a9e2d1b4c6f
+    source-desc: tag 'v1.2.3'
+
+Rules:
+
+- Line endings are LF. The final line may lack its LF.
+- The file holds no NUL bytes and no blank lines.
+- After the colon a reader accepts zero or one space; a writer always emits exactly
+  one. A known value is non-empty, holds no CR, and does not begin with a space.
+  Everything else in a value is arbitrary bytes; UTF-8 passes.
+- A known field appears at most once; a duplicate is mangled. Unknown fields are
+  ignored (see Extensibility). Fields can be reordered.
+- Field hangar-format is reserved for the format line; a misplaced one is refused.
+
+The fields of format 1:
+
+source
+  A full lowercase hex object id, 40 or 64 characters (the repository's hash
+  length). The merge's source, kept verbatim: a tag id stays a tag id. A hangar
+  holds one source; an octopus merge is refused by writers, not recorded with one
+  head picked.
+
+source-desc
+  The label a finished merge's subject renders from, in FETCH_HEAD's grammar:
+  "tag 'v1.2.3'", "remote-tracking branch 'origin/x'", "commit '<sha>'". It is a
+  label interpolated into messages, never resolved.
+
+Both are required.
+
+Versions
+--------
+
+The format line identifies the grammar. The parser processes only its designated
+major version, rejecting all other versions. Version mismatch recovery is
+deterministic: a newer major version implies an upgrade, an older major version
+explicitly designates the compatible legacy tool. Tools never migrate across
+formats.
+
+Classification comes before any field is read.
+
+The version never selects behavior; readers branch on field presence, never on the
+version: a change that needs new logic adds a field, and a change that reinterprets
+an existing field is a new major.
+
+Comparing majors needs no arithmetic: leading zeros are forbidden, so a longer
+digit string is always the larger number, and at equal length lexicographic order
+is numeric order.
+
+A tree is a chain tree if and only if it holds a manifest whose first line is
+exactly the reader's own format line.
+
+The message
+-----------
+
+message holds the merge message recorded when the hangar was written. It contains
+the stripped, comment-free text of MERGE_MSG. It is opaque bytes with no fixed
+grammar, and it is one place where a manual edit is preserved.
+
+The stages
+----------
+
+stages/ contains one directory for each held path. Each directory is named
+exactly after its path, byte for byte. Directories nest to mirror path
+nesting: the path a/b is stored in stages/a/b/, with its stage files alongside
+the directories for paths beneath it.
+
+Every directory under stages/ is part of a held path, so a reader never
+questions a directory name, not even one named 1, 2, 3 or w (the held path 3
+has the directory stages/3/). Only a file can be wrong, in one of two ways:
+a file directly under stages/ sits in no path's directory, and a file inside
+a path's directory that is not named 1, 2, 3 or w is not a stage file.
+Either way the record is corrupt.
+
+Files 1, 2 and 3 are the blob content of the index's stages 1/2/3: base, ours,
+theirs. A stage file's tree-entry mode carries the mode of what it holds, the
+index stage's for 1, 2 and 3, the staged working file's for w, so an exec bit
+or a symlink round-trips. Only 100644, 100755 and 120000 exist. Submodule
+pointers are out of scope: a stage file is blob content, and a writer refuses
+a merge that stops on one.
+
+File w is the working file as the index would stage it when the hangar was
+written: its clean-filtered content. No w file means the working file did not
+exist then. A reader hashes a later working file the same way to compare it
+against w.
+
+A stages/<path>/ directory holding w and none of 1, 2 and 3 is an incomplete
+hangar, not a corrupt one. The likely cause is a manual edit that removed the
+stage files but left the directory behind, so recovery is to finish the
+release by removing the directory, as any resolution would. If the manual
+edit also removes w, the path is released, and a later tree cannot
+distinguish that from a normal resolution.
+
+A directory under stages/ that holds only directories is structure: it is
+part of a deeper held path's name.
+
+The resolution record
+---------------------
+
+A path is held while its directory holds a stage, and released when its
+stage files are gone from a later tree. That removal is the resolution
+record, and it is whole: the directory and everything under it go
+together, so releasing a path releases every held path beneath it. A tree
+cannot hold an empty directory, so the deletion itself is what any
+ordinary diff review shows, and the structure above a release folds away
+with it and releases nothing.
+
+Transit
+-------
+
+The format is defined as a subtree at the root of a commit's tree, and byte-exact
+transit is part of the definition. It has one mechanism: .hangar/.gitattributes
+carries exactly
+
+    * -text -filter -ident -working-tree-encoding
+
+A .gitattributes committed inside .hangar is the only guard that travels with the
+commits: the repository's own eol, filter, $Id$ expansion, and encoding rules apply
+to the hangar's files at checkout in any clone, and only that file overrides them
+for the subtree.
+
+Every writer sets the line, but no read verifies it: reads take the blobs straight
+from the object database. The line guards checkouts but not reads.
+
+Object ids follow the repository's hash format, 40 or 64 hex.
+
+Extensibility
+-------------
+
+Evolution within a major is additive fields. Unknown fields are ignored by readers.
+A registered field's grammar is never repurposed.
