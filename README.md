@@ -7,7 +7,7 @@ A merge stopped at conflicts is state git cannot commit, push, or hand to anyone
 Three git extensions in one bash script, with no dependencies beyond git and standard Unix utilities:
 
 - **git park** moves the stopped merge onto a carrier branch, storing the conflicted paths under a `.hangar` directory that travels as ordinary commits. The branch you were on stays untouched at its pre-merge commit.
-- **git unpark** takes a parked path back out of the hangar. Unchanged, it reopens as the conflict git left, so `git mergetool` and your favorite IDE work as usual. Edited or deleted by hand, the working file is your resolution.
+- **git unpark** takes a parked path back out of the hangar. Unchanged, it reopens as the conflict git left, so `git mergetool` and your favorite IDE work as usual. Changed or deleted by hand, the working file is your resolution.
 - **git land** stages the finished work from the carrier onto the destination and writes `MERGE_HEAD`. Your `git commit` finishes the merge.
 
 ## Why we built it
@@ -78,9 +78,9 @@ $ git commit -m 'resolve: f.txt'
 $ git push
 ```
 
-- Unpark compares the working file with the stored one, content and mode both.
+- Unpark compares the working file with the stored one, in content, mode, and type.
 - Unchanged: the conflict is restored into the index, as git left it.
-- Changed in content or mode, or deleted: no conflict is recreated. The working file is your resolution, left unstaged for review.
+- Changed in content, mode, or type, or deleted: no conflict is recreated. The working file is your resolution, left unstaged for review.
 - Either way the path is released from the hangar.
 - You can also work the hangar by hand: fix the file, `git add -- <path>`, release it with `git rm -r .hangar/stages/<path>`, and commit.
 

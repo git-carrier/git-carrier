@@ -72,9 +72,9 @@ EOF
 usage: git unpark [<path>...]
 
 Take held paths back out of the hangar. A path unchanged since park, in
-content and mode, reopens as a conflict; a path you have changed in content
-or mode, or deleted, is your resolution, left unstaged for review. Either
-way, the path is released from the hangar.
+content, mode, and type, reopens as a conflict; a path you have changed in
+content, mode, or type, or deleted, is your resolution, left unstaged for
+review. Either way, the path is released from the hangar.
 
 With no paths, every held path is taken. A directory takes every held path under
 it. Paths resolve from your current directory, and a path naming nothing in the
@@ -1226,8 +1226,11 @@ recorded_reg_mode() {
 #           stage-0 beside stages 1-3 makes git add fail to clear the entry), then feed
 #           1/2/3 back with mode and sha from the hangar's tree entries. On a mismatch, no
 #           index state: the working directory is the resolution, left unstaged for
-#           review. The mode is part of the file: a mode-only change (a chmod, a type
-#           change holding the same bytes) is a change, not an unchanged state.
+#           review. The mode is part of the file: a mode-only change (a chmod) or a
+#           type-only change (a regular/symlink swap holding the same bytes) is a change,
+#           not an unchanged state, and the verdict names the kind as the porcelain does
+#           (diff's old mode/new mode, status's T); the staged and committed doors name the
+#           kind too.
 #           core.fileMode false and core.symlinks false are read the way git's own add
 #           reads them (ce_mode_from_stat), or a change git itself ignores would misreport.
 #           Either way the stages directory is deleted from index and worktree; the removal
@@ -1243,7 +1246,7 @@ recorded_reg_mode() {
 
 unpark_main() {
   local cur i p rec r b reopened resolved incomplete review staged recorded
-  local arg comp found j prefix w present worktree_sha frozen_sha outcome literal q summary
+  local arg comp found j prefix w present worktree_sha frozen_sha outcome literal q summary delta
   local worktree_mode frozen_mode fmfalse smfalse RECORDED_MODE
   local npspecs nstage nparked nmatch nhid nleft
   local nb nsp
@@ -1485,6 +1488,9 @@ unpark_main() {
     p=${MATCHED[$i]}
     literal=":(literal)$p"
     REOPEN[i]=0
+    # the kind of a mode- or type-only resolution, set by the outcome chain below and read by
+    # the staged and committed doors; reset per path, or a door would read the last path's kind
+    delta=
     if [ "${MHAVE123[$i]}" = 0 ]; then
       outcome='no stage files, only the parked copy (releasing)'
       incomplete=$((incomplete + 1))
@@ -1516,8 +1522,14 @@ unpark_main() {
           outcome='no file (resolved as a deletion)'
         fi
       else
-        # The blob alone is not the file: a mode-only change (a chmod, a type change holding
-        # the same bytes) is a change, and the working file, mode included, is the resolution.
+        # The blob alone is not the file: the mode is part of it, and a mode-only or type-only
+        # change is a change, the working file, mode included, being the resolution. A blob-equal
+        # mode difference is named by its kind, the words the porcelain uses for it (diff's old
+        # mode/new mode lines, status's T), so the reader recognizes the event in the next
+        # command run; a blob difference names the content alone, the change the reader has
+        # already seen. delta carries the kind to the staged and committed doors below, where
+        # the worktree is held equal to the index (and to HEAD at the committed door), so the
+        # recorded resolution is named by the same kind.
         if [ -z "$worktree_sha" ]; then
           # Present but neither file nor symlink (a directory): the working tree is the resolution.
           outcome='differs (that content is the resolution)'
@@ -1525,6 +1537,16 @@ unpark_main() {
           outcome='restored (that content is the resolution)'
         elif [ "$worktree_sha" = "$frozen_sha" ] && [ "$worktree_mode" = "$frozen_mode" ]; then
           outcome='unchanged (reopened)'
+        elif [ "$worktree_sha" = "$frozen_sha" ]; then
+          # The blob matches, the mode does not: one side a symlink is a type change, an
+          # exec-bit difference a mode change
+          if [ "$worktree_mode" = 120000 ] || [ "$frozen_mode" = 120000 ]; then
+            delta='type'
+            outcome='differs only in type (that type is the resolution)'
+          else
+            delta='mode'
+            outcome='differs only in mode (that mode is the resolution)'
+          fi
         else
           outcome='differs (that content is the resolution)'
         fi
@@ -1550,9 +1572,11 @@ unpark_main() {
         elif ! git -C "$top" diff --cached --quiet --no-ext-diff HEAD -- "$literal"; then
           staged=$((staged + 1))
           outcome='already staged (releasing)'
+          [ -z "$delta" ] || outcome="already staged (releasing; differs only in $delta)"
         else
           recorded=$((recorded + 1))
           outcome='already committed (releasing)'
+          [ -z "$delta" ] || outcome="already committed (releasing; differs only in $delta)"
         fi
         ;;
       esac

@@ -78,7 +78,7 @@ outcome_repo() {
   chmod 755 f.txt
   run git unpark f.txt
   assert_success
-  assert_output --partial "differs (that content is the resolution): f.txt"
+  assert_output --partial "differs only in mode (that mode is the resolution): f.txt"
   assert_output --partial "1 resolution is unstaged for review"
   [ -z "$(git ls-files --unmerged)" ] ||
     fail "a mode-only change must not reopen the conflict"
@@ -101,7 +101,7 @@ outcome_repo() {
   ln -s -- "${content%x}" f.txt
   run git unpark f.txt
   assert_success
-  assert_output --partial "differs (that content is the resolution): f.txt"
+  assert_output --partial "differs only in type (that type is the resolution): f.txt"
   [ -z "$(git ls-files --unmerged)" ] ||
     fail "a type change must not reopen the conflict"
 
@@ -123,9 +123,62 @@ outcome_repo() {
   printf 'ours' >link.txt
   run git unpark link.txt
   assert_success
-  assert_output --partial "differs (that content is the resolution): link.txt"
+  assert_output --partial "differs only in type (that type is the resolution): link.txt"
   [ -z "$(git ls-files --unmerged -- link.txt)" ] ||
     fail "a type change must not reopen the conflict"
+}
+
+@test "a mode-only resolution already staged or already committed is named by its kind at the door" {
+  # staged: chmod'ed and added, not yet committed
+  conflict_repo sy9
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  chmod 755 f.txt
+  git add f.txt
+  run git unpark f.txt
+  assert_success
+  assert_output --partial "already staged (releasing; differs only in mode): f.txt"
+  assert_output --partial "1 resolution already staged: review and commit when ready"
+
+  # committed: chmod'ed, added, and committed, the release never run
+  conflict_repo sy9b
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  chmod 755 f.txt
+  git add f.txt && git commit -qm resolve
+  run git unpark f.txt
+  assert_success
+  assert_output --partial "already committed (releasing; differs only in mode): f.txt"
+  assert_output --partial "1 resolution already committed: commit the hangar release"
+}
+
+@test "a type-only resolution already staged or already committed is named by its kind at the door" {
+  # staged: the file became a link holding the same bytes, added, not yet committed
+  conflict_repo sy10
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  local content
+  content=$(git cat-file blob HEAD:f.txt && printf x)
+  rm f.txt
+  ln -s -- "${content%x}" f.txt
+  git add f.txt
+  run git unpark f.txt
+  assert_success
+  assert_output --partial "already staged (releasing; differs only in type): f.txt"
+  assert_output --partial "1 resolution already staged: review and commit when ready"
+
+  # committed: the same, resolved and committed, the release never run
+  conflict_repo sy10b
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  content=$(git cat-file blob HEAD:f.txt && printf x)
+  rm f.txt
+  ln -s -- "${content%x}" f.txt
+  git add f.txt && git commit -qm resolve
+  run git unpark f.txt
+  assert_success
+  assert_output --partial "already committed (releasing; differs only in type): f.txt"
+  assert_output --partial "1 resolution already committed: commit the hangar release"
 }
 
 @test "core.fileMode false: the exec bit stays out of the comparison, as git's own add keeps it" {
