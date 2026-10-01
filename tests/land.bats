@@ -790,6 +790,94 @@ c" ] || fail "the second landing did not record the later resolution"
   [ "$(git rev-parse main^1)" = "$O" ] || fail "the landed merge's first parent is not O"
 }
 
+@test "dst-position check: the refusal's recipe lands a moved dst without rewriting the shared carrier" {
+  complete_chain lrec lb
+  git checkout -q main
+  printf 'moved on\n' >h.txt && git add h.txt && git commit -qm moved-c
+  MOVED=$(git rev-parse main)
+  TIP=$(git rev-parse carrier/lb)
+  git checkout -q carrier/lb
+  run git land main
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "cannot fast-forward to the merge's base commit $(git rev-parse --short "$O")"
+  assert_output --partial "reset main to"
+  # the refusal's own recipe: a new local branch, rebased --onto the moved main, lands from there
+  git switch -q -c carrier/lb.land
+  git rebase --onto main "$O" >/dev/null
+  run git land main
+  assert_success
+  assert_output --partial "prepared the landing on main"
+  git commit -qm finished
+  [ "$(git rev-parse main^1)" = "$MOVED" ] || fail "the landed merge's first parent is not the moved main"
+  [ "$(git rev-parse main^2)" = "$SRC" ] || fail "the landed merge's second parent is not the source"
+  [ "$(git show main:h.txt)" = "moved on" ] || fail "main's intervening commit did not survive the landing"
+  [ "$(git show main:f.txt)" = "a
+RESOLVED
+c" ] || fail "this chain's resolutions did not land"
+  [ "$(git rev-parse carrier/lb)" = "$TIP" ] || fail "the recipe rewrote the shared carrier"
+  [ "$(git merge-base carrier/lb.land main)" = "$MOVED" ] || fail "the landing branch did not rebase onto the moved main"
+}
+
+@test "a landing on a branch behind its upstream is allowed like any git commit, warned with git's tracking line" {
+  # the handoff shape: a bare origin, a finished carrier, and an approver clone that goes stale
+  # in both directions while machine 1 moves on
+  complete_chain lstale lb
+  git checkout -q main
+  git clone -q --bare . "$CARRIER_WORK/origin.git"
+  git remote add origin "$CARRIER_WORK/origin.git"
+  git push -q origin main side carrier/lb
+  git clone -q "$CARRIER_WORK/origin.git" "$CARRIER_WORK/approver"
+  git -C "$CARRIER_WORK/approver" config user.email a@b.c
+  git -C "$CARRIER_WORK/approver" config user.name T
+  cd "$CARRIER_WORK/approver" || return 1
+  git switch -q -c carrier/lb origin/carrier/lb
+  # a current clone: ready, and no warning anywhere
+  run git land --check main
+  assert_success
+  assert_output --partial "check: ready to land merge from carrier/lb onto main"
+  case $output in
+  *warning*) fail "a current clone drew an upstream warning: [$output]" ;;
+  esac
+  # machine 1 moves on: main advances past the base, and the shared carrier gains a resolution
+  git -C "$REPO" switch -q main
+  printf 'moved on\n' >"$REPO/h.txt"
+  git -C "$REPO" add -A && git -C "$REPO" commit -qm moved-c
+  git -C "$REPO" switch -q carrier/lb
+  printf 'a\nRESOLVED-MORE\nc\n' >"$REPO/f.txt"
+  git -C "$REPO" add -A && git -C "$REPO" commit -qm resolve-more
+  git -C "$REPO" push -q origin main carrier/lb
+  git fetch -q origin
+  # the stale clone still passes the check, warned with git's own tracking lines, both branches
+  run git land --check main
+  assert_success
+  assert_output --partial "check: ready to land merge from carrier/lb onto main"
+  assert_output --partial "warning: carrier/lb is behind 'origin/carrier/lb' by 1 commit, and can be fast-forwarded"
+  assert_output --partial "warning: main is behind 'origin/main' by 1 commit, and can be fast-forwarded"
+  # and the landing is allowed like any git commit, the same warning on the way in
+  run git land main
+  assert_success
+  assert_output --partial "prepared the landing on main"
+  assert_output --partial "warning: main is behind 'origin/main' by 1 commit, and can be fast-forwarded"
+  git commit -qm "landed on a stale main"
+  [ "$(git rev-parse main^1)" = "$O" ] || fail "the stale landing's first parent is not the stale base"
+  [ "$(git rev-parse main^2)" = "$SRC" ] || fail "the stale landing's second parent is not the source"
+  # the trap is where git puts it: the push of the merge is rejected as non-fast-forward
+  run git push origin main
+  assert_failure
+  case $output in
+  *"non-fast-forward"*) ;;
+  *) fail "the stale landing's push was not rejected as non-fast-forward: [$output]" ;;
+  esac
+  # the recovery, git's own: main goes current, and the moved main is then the refusal's case
+  git reset -q --hard origin/main
+  git switch -q carrier/lb
+  run git land --check main
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "cannot fast-forward to the merge's base commit"
+}
+
 @test "--check: every check runs, nothing moves" {
   complete_chain ldr lb
   MAIN=$(git rev-parse main)
@@ -852,6 +940,9 @@ c" ] || fail "the second landing did not record the later resolution"
   run git land main
   assert_success
   assert_prepared main "$O" "$SRC" "$(git rev-parse carrier/lb)" "commit '$SRC'"
+  run git diff --cached --check
+  assert_failure
+  assert_output --partial "leftover conflict marker"
   git commit -qm "finish: the never-touched markers are the resolution"
   git show main:f.txt | grep -q '^<<<<<<< ' ||
     fail "the marker-laden resolution did not land verbatim"

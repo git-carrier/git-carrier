@@ -30,7 +30,7 @@ mkdir -p ~/.local/bin
 ln -s "$PWD/git-carrier.bash" ~/.local/bin/git-park
 ln -s "$PWD/git-carrier.bash" ~/.local/bin/git-unpark
 ln -s "$PWD/git-carrier.bash" ~/.local/bin/git-land
-
+export PATH="$HOME/.local/bin:$PATH"
 git park --version
 ```
 
@@ -94,11 +94,12 @@ $ git land main
 land: prepared the landing on main (69a1f2c): resolutions staged, MERGE_HEAD written (4c8e07b)
 land: the merge work stays on carrier/v1.2.3; run 'git commit' to finish the merge
 
-$ git commit                # the real merge: two parents
+$ git diff --cached --check     # inspect any reported markers or whitespace errors
+$ git commit                    # the real merge: two parents
 ```
 
 - The hangar itself never lands: the final tree is the work tree minus `.hangar`, so no hangar content leaks into the destination's history.
-- Re-running `git land main` once the merge has landed reports `this merge already landed` and exits 0.
+- Re-running `git land main` from the carrier once the merge has landed reports `this merge already landed` and exits 0.
 - Run land from the carrier branch. Standing on the destination, land refuses (`HEAD is not a parked merge`).
 
 Use `-h` with any command to see its help text and available flags.
@@ -126,6 +127,7 @@ For parallel agents, branch each one from the same parked commit and assign disj
 - Parked commits carry conflict markers by design. Pre-commit hooks, push hooks, and hosting checks may reject them. Commit with `--no-verify` and configure the policies for carrier branches.
 - The carrier is a handoff, never a contribution. Nobody merges `carrier/v1.2.3` into anything. The work arrives through `git land`.
 - Unrelated unstaged changes stay out of the parked merge. `git add` a path before parking if it belongs in the merge.
+- Land reads local refs only. Pull the carrier and destination branches before landing.
 
 ## Related tools
 

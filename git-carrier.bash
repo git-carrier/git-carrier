@@ -89,7 +89,7 @@ usage: git land [--amend] [--check] <dst>
 
 Prepare the parked merge at HEAD for landing on <dst>. Each path still held in
 the hangar is reported, and land refuses until every one is released. A merge
-that already landed on <dst> is a no-op. When the merge is conflict-free, land
+that already landed on <dst> is a no-op. Once every held path is released, land
 switches to <dst>, stages the resolutions, and writes MERGE_HEAD; then run
 'git commit' to finish the merge with both parents. Land never commits.
 
@@ -100,6 +100,10 @@ switches to <dst>, stages the resolutions, and writes MERGE_HEAD; then run
     --check              report merge readiness without changing anything:
                          which paths are still held, whether the merge already
                          landed, or that it is ready to land
+
+Land reads local refs only. A landing behind upstream is allowed, like any git
+commit, but will raise a warning. Update both branches from their upstreams
+before checking or landing.
 EOF
     ;;
   esac
@@ -1704,8 +1708,8 @@ prune_stages_dirs() {
 #           chain tip, or, with --amend, at this chain's own earlier landing: every other
 #           position holds work a landing may not keep (another merge of the recorded source
 #           that is not one of this chain's landings included: which merge stands is not the
-#           landing's to guess), and the rebase or the reset is the user's own move, never the
-#           landing's.
+#           landing's to guess), and any rebase or deliberate history rewrite is the user's own
+#           move, never the landing's.
 # No-op   : this chain already landed in <dst>, a merge whose second parent is the recorded
 #           source and whose tree is the resolved tree of the chain commit that was the tip at
 #           landing time; a match is exit 0 wherever <dst> has gone since. (Ancestry was the
@@ -1856,6 +1860,18 @@ land_main() {
   land_chain
 }
 
+# Warn when a branch is behind its upstream.
+warn_stale_branch() {
+  local branch=$1 up upname btip n
+  up=$(peel "$branch@{upstream}") || return 0
+  btip=$(git -C "$top" rev-parse -q --verify "refs/heads/$branch" 2>/dev/null) || return 0
+  [ "$up" != "$btip" ] || return 0
+  git -C "$top" merge-base --is-ancestor "$btip" "$up" || return 0
+  n=$(git -C "$top" rev-list --count "$btip..$up")
+  upname=$(git -C "$top" rev-parse --abbrev-ref "$branch@{upstream}")
+  warn "$branch is behind '$upname' by $(counted "$n" commit), and can be fast-forwarded"
+}
+
 # A complete chain at HEAD: land it onto <dst>. land_main's locals are in scope here through
 # bash dynamic scoping: chain_tip (the chain's tip commit), srcv (its recorded source id), scc
 # (the source's peel), srcdesc (its recorded description), cur (the chain's branch), dst,
@@ -1965,6 +1981,10 @@ land_chain() {
   if [ "$dirty" = 1 ]; then
     refuse "the checkout has tracked changes: commit or stash them, then re-run"
   fi
+
+  # --- landing behind upstream warnings ---
+  warn_stale_branch "$cur"
+  warn_stale_branch "$dst"
 
   # --- dst-position check ---
   dst_tip=$(git -C "$top" rev-parse "refs/heads/$dst")
