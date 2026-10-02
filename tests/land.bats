@@ -616,7 +616,7 @@ c" ] || fail "this chain's resolutions did not land"
   run git land --amend main
   assert_success
   assert_output --partial "prepared the landing on main (forced update $PREVS...$(git rev-parse --short "$O"))"
-  assert_output --partial "warning: $PREVS is a earlier landing of this parked merge; now recorded in the reflog as main@{1}"
+  assert_output --partial "warning: $PREVS is an earlier landing of this parked merge; now recorded in the reflog as main@{1}"
   assert_prepared main "$O" "$SRC" "$(git rev-parse carrier/lb3)" "commit '$SRC'"
   [ "$(git rev-parse 'main@{1}')" = "$PREV" ] ||
     fail "the earlier landing is not recorded in the reflog as main@{1}"

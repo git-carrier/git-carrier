@@ -2072,7 +2072,7 @@ land_chain() {
   write_merge_state "$chain_tip" "$srcv" "$srcdesc"
   echo "$APPLET: prepared the landing on $dst $where: resolutions staged, MERGE_HEAD written ($(short "$srcv"))"
   if [ "$amended" = 1 ]; then
-    warn "$(short "$dst_tip") is a earlier landing of this parked merge; now recorded in the reflog as $dst@{1}"
+    warn "$(short "$dst_tip") is an earlier landing of this parked merge; now recorded in the reflog as $dst@{1}"
   fi
   echo "$APPLET: the merge work stays on $cur; run 'git commit' to finish the merge"
   exit 0
