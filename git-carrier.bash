@@ -460,6 +460,16 @@ require_worktree_hangar() {
   refuse "the working tree's $HANGAR is missing or unreadable: restore it (git checkout -- $HANGAR), then re-run"
 }
 
+# The worktree hangar's .gitattributes must be a regular file or absent..
+require_worktree_attrs() {
+  local p="$top/$HANGAR/.gitattributes"
+  if [ -L "$p" ] || { [ -e "$p" ] && [ ! -f "$p" ]; }; then
+    refuse_recovery \
+      "a symlink or a non-regular file stands where the hangar holds its .gitattributes" \
+      "move it away and restore it (git checkout -- $HANGAR/.gitattributes), then re-run"
+  fi
+}
+
 # The first symlink (or non-directory) on the worktree path of $HANGAR/stages/$1, into
 # STAGES_LINK as a worktree-relative path, empty when the path is safe to write or remove:
 # park writes the hangar and unpark's release removes it by that worktree path, and a link
@@ -907,7 +917,8 @@ derive_src_desc() {
 #           hangar holds); a .hangar of the user's in the worktree (a re-park accepts only the
 #           hangar's own, checked by format line and shape); gitlink conflicts (a stage file is
 #           blob content, a submodule pointer is not); a symlink or a non-directory standing
-#           on a stages path (a write or a removal never traverses a link); a staged,
+#           on a stages path (a write or a removal never traverses a link), or a symlink or
+#           a non-regular file standing on the hangar's .gitattributes; a staged,
 #           uncommitted park; nothing to park (no stopped merge, no parked chain). A manifest
 #           first line that is not ours dies: the hangar is not this tool's. Every refusal
 #           runs before the branch creation, park's first mutation.
@@ -1005,6 +1016,7 @@ park_main() {
 
   if [ "$mode" = repark ]; then
     require_worktree_hangar
+    require_worktree_attrs
   elif [ -e "$top/$HANGAR" ] || [ -L "$top/$HANGAR" ]; then
     if tree_has_hangar HEAD; then
       refuse "a parked merge is checked out here: land it first (git land <dst>) or switch away before parking another merge"
@@ -1238,11 +1250,13 @@ recorded_reg_mode() {
 #
 # Refuses : HEAD not a parked chain (a staged, uncommitted park has its own refusal); any
 #           merge, rebase, cherry-pick, revert, or am in progress here; detached HEAD; a
-#           worktree .hangar that is missing or unreadable; a matched path hidden by a sparse
-#           checkout; a symlink or a non-directory standing on a matched path's stages
-#           directory (the release's rm -rf never traverses a link); no held paths (run land
-#           instead). A manifest first line that is not ours, at HEAD or in the worktree,
-#           dies: the hangar is not this tool's.
+#           worktree .hangar that is missing or unreadable; a symlink or a non-regular file
+#           standing on the hangar's .gitattributes (the release would record it into the
+#           carrier); a matched path hidden by a sparse checkout; a symlink or a
+#           non-directory standing on a matched path's stages directory (the release's
+#           rm -rf never traverses a link); no held paths (run land instead). A manifest
+#           first line that is not ours, at HEAD or in the worktree, dies: the hangar is not
+#           this tool's.
 
 unpark_main() {
   local cur i p rec r b reopened resolved incomplete review staged recorded
@@ -1304,6 +1318,7 @@ unpark_main() {
     refuse "detached HEAD: the merge work must live on a branch; git switch -c <name> first, then re-run"
   fi
   require_worktree_hangar
+  require_worktree_attrs
 
   # --- the held paths: from the hangar's tree ---
   # strict: these records feed back into the index, so a mangled hangar is refused at read time,

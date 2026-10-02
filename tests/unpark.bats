@@ -1085,6 +1085,58 @@ paths_repo() {
     fail "the refused unpark took the path out of the hangar"
 }
 
+@test "a symlink or a non-regular file in place of the hangar's .gitattributes is refused before the release records it into the carrier" {
+  # the release stages the worktree hangar verbatim: a symlink standing there would travel
+  # into the carrier as the transit guarantee itself, so unpark refuses it before anything
+  # is taken out
+  conflict_repo sy13
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  printf 'precious\n' >"$CARRIER_WORK/attrs-target"
+  rm .hangar/.gitattributes
+  ln -s "$CARRIER_WORK/attrs-target" .hangar/.gitattributes
+  run git unpark -- f.txt
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "a symlink or a non-regular file stands where the hangar holds its .gitattributes"
+  assert_output --partial "git checkout -- .hangar/.gitattributes"
+  # nothing was taken out and nothing was recorded: the release never staged the symlink
+  [ -n "$(git ls-files -- .hangar/stages)" ] ||
+    fail "the refused unpark took the path out of the hangar"
+  git diff --cached --quiet ||
+    fail "the refused unpark staged something"
+  [ "$(cat "$CARRIER_WORK/attrs-target")" = "precious" ] ||
+    fail "the refused unpark disturbed a file outside the repository"
+  # the named recovery: move it away, restore it, and the release proceeds without it
+  rm .hangar/.gitattributes
+  git checkout -- .hangar/.gitattributes
+  run git unpark -- f.txt
+  assert_success
+  assert_output --partial "unchanged (reopened)"
+  git ls-files -s -- .hangar/.gitattributes | grep -q '^100644 ' ||
+    fail "the release staged a foreign entry in place of the transit line"
+  # the crafted carrier carries the symlink itself: any clone refuses it the same way, and
+  # moving it away drops the foreign entry from the carrier's next release
+  conflict_repo sy14
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  rm .hangar/.gitattributes
+  ln -s "$CARRIER_WORK/attrs-target" .hangar/.gitattributes
+  git add .hangar/.gitattributes
+  git commit -qm crafted
+  run git unpark -- f.txt
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "a symlink or a non-regular file stands where the hangar holds its .gitattributes"
+  [ "$(cat "$CARRIER_WORK/attrs-target")" = "precious" ] ||
+    fail "the refused unpark disturbed a file outside the repository"
+  rm .hangar/.gitattributes
+  run git unpark -- f.txt
+  assert_success
+  git diff --cached --name-only -- .hangar | grep -qxF .hangar/.gitattributes ||
+    fail "the release did not drop the crafted transit entry from the carrier"
+}
+
 @test "the uncommitted park window is refused, not reported as a missing chain" {
   conflict_repo u30
   git park -b carrier/side >/dev/null

@@ -540,6 +540,43 @@ STAGED ON PURPOSE" ] || fail "a deliberately staged change was not carried into 
     fail "the refused re-park disturbed the reopened conflict"
 }
 
+@test "a symlink or a non-regular file in place of the hangar's .gitattributes is refused before the re-park writes through it" {
+  # park rewrites the transit line on every park, a re-park included, and a redirect onto a
+  # symlink writes through it, outside the repository, so the re-park refuses it first
+  conflict_repo sy11
+  git park -b carrier/side >/dev/null
+  git commit -qm parked
+  git unpark f.txt >/dev/null # the reopened f.txt is the re-park's subject
+  printf 'precious\n' >"$CARRIER_WORK/attrs-target"
+  rm .hangar/.gitattributes
+  ln -s "$CARRIER_WORK/attrs-target" .hangar/.gitattributes
+  run git park
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "a symlink or a non-regular file stands where the hangar holds its .gitattributes"
+  assert_output --partial "git checkout -- .hangar/.gitattributes"
+  [ "$(cat "$CARRIER_WORK/attrs-target")" = "precious" ] ||
+    fail "the refused re-park wrote through the symlink"
+  [ -n "$(git ls-files --unmerged -- f.txt)" ] ||
+    fail "the refused re-park disturbed the reopened conflict"
+  # the named recovery: move it away, restore it, and the re-park proceeds
+  rm .hangar/.gitattributes
+  git checkout -- .hangar/.gitattributes
+  run git park
+  assert_success
+  assert_output --partial "re-parked"
+  [ "$(cat .hangar/.gitattributes)" = "* -text -filter -ident -working-tree-encoding" ] ||
+    fail "the re-parked hangar does not carry the transit line"
+  # a directory standing there is refused the same way: the entry must be a regular file
+  git unpark f.txt >/dev/null
+  rm -rf .hangar/.gitattributes
+  mkdir .hangar/.gitattributes
+  run git park
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "a symlink or a non-regular file stands where the hangar holds its .gitattributes"
+}
+
 @test "the format line: a greater major refuses with the upgrade, anything else dies" {
   conflict_repo m14
   mkdir .hangar
