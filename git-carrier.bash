@@ -52,8 +52,10 @@ usage: git park [--branch <carrier-branch>]
 Move a merge that stopped at conflicts onto a carrier branch, so the work can
 be committed, pushed, and handed around like any other branch. The conflicted
 paths are stored under .hangar, the merge state is cleared, and the hangar is
-staged; then run 'git commit' to record the merge as an ordinary commit. The
-branch the merge started on stays untouched. Park never commits.
+staged; then run 'git commit' to record the merge as an ordinary commit. Park
+leaves a default message for that commit in MERGE_MSG, the merge's own words
+with a 'park: ' prefix. The branch the merge started on stays untouched. Park
+never commits.
 
     --branch <name>       the carrier branch to create; required on the first
                           park, refused on a re-park and when the name is
@@ -929,12 +931,14 @@ derive_src_desc() {
 #           merge message (stripspace --strip-comments) as advisory context; write the manifest
 #           (format line; source: the MERGE_HEAD id verbatim, a tag id stays a tag id; source-desc:
 #           derived once by derive_src_desc, an id-only desc drawing the park warning); clear
-#           MERGE_HEAD/MERGE_MSG/MERGE_MODE/MERGE_RR via --git-path; stage the hangar with
-#           `git add -f`. A re-park trusts the checked-out manifest and message verbatim, unknown
-#           fields preserved, and unions its stage files into the existing stages/; released
-#           paths stay released, and stages/ is never rm -rf'd. Park never commits: the user's
-#           own `git commit` creates the parked commit, one parent, squashable. The report names
-#           the branch the merge started on and the exact `git land <dst>` to run later.
+#           MERGE_HEAD/MERGE_MODE/MERGE_RR via --git-path, rewrite MERGE_MSG with the parked
+#           commit's default message ('park: ' + the merge's own words; no message, no
+#           default), stage the hangar with `git add -f`. A re-park trusts the checked-out
+#           manifest and message verbatim, unknown fields preserved, and unions its stage
+#           files into the existing stages/; released paths stay released, and stages/ is
+#           never rm -rf'd. Park never commits: the user's own `git commit` creates the
+#           parked commit, one parent, squashable. The report names the branch the merge
+#           started on and the exact `git land <dst>` to run later.
 
 park_main() {
   local name endopts dstname
@@ -1150,6 +1154,17 @@ park_main() {
   # Clear the merge state last: it is the point of no return, and every fallible step above runs
   # while the merge is still recoverable with git merge --abort.
   rm -f "$(gitpath MERGE_HEAD)" "$(gitpath MERGE_MSG)" "$(gitpath MERGE_MODE)" "$(gitpath MERGE_RR)"
+
+  # The merge's own words become the parked commit's default in MERGE_MSG's place: git reads
+  # a MERGE_MSG left behind as the starting text of a plain commit's editor (the
+  # prepared-message slot it also gives a squash) and clears it on any successful commit, so
+  # the default serves exactly the next `git commit`.
+  if [ "$mode" = fresh ] && [ -s "$td/msg" ]; then
+    {
+      printf 'park: '
+      cat "$td/msg"
+    } >"$msgf"
+  fi
 
   if [ "$mode" = repark ] && git -C "$top" diff --cached --quiet --no-ext-diff --; then
     echo "$APPLET: $(counted "$NUNIQ" path) re-parked; the restored state matches HEAD: no commit needed"

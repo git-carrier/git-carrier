@@ -253,16 +253,22 @@ STAGED ON PURPOSE" ] || fail "a deliberately staged change was not carried into 
     fail "symlink stage file 2 does not hold ours' target"
 }
 
-@test "park clears the merge state: MERGE_HEAD, MERGE_MSG, MERGE_MODE, MERGE_RR are gone" {
+@test "park clears the merge state: MERGE_HEAD, MERGE_MODE, MERGE_RR are gone; MERGE_MSG is rewritten as the default message" {
   conflict_repo m4
   local f
   touch "$(git rev-parse --git-path MERGE_RR)"
   git park -b carrier/side >/dev/null
-  for f in MERGE_HEAD MERGE_MSG MERGE_MODE MERGE_RR; do
+  for f in MERGE_HEAD MERGE_MODE MERGE_RR; do
     if [ -e "$(git rev-parse --git-path "$f")"; then
       fail "park left $f behind"
     fi
   done
+  # MERGE_MSG's place is taken by the prepared default: the merge's own words, prefixed
+  [ "$(cat "$(git rev-parse --git-path MERGE_MSG)")" = "park: Merge branch 'side'" ] ||
+    fail "MERGE_MSG does not hold the prepared default: [$(cat "$(git rev-parse --git-path MERGE_MSG)")]"
+  git commit -qm parked
+  [ ! -e "$(git rev-parse --git-path MERGE_MSG)" ] ||
+    fail "the parked commit left MERGE_MSG behind (git clears it on any commit)"
   return 0
 }
 
@@ -699,6 +705,8 @@ STAGED ON PURPOSE" ] || fail "a deliberately staged change was not carried into 
   assert_success
   assert_output --partial "parked into .hangar on carrier/side"
   assert_output --partial "detached HEAD; land it later with: git land <dst>"
+  [ "$(cat "$(git rev-parse --git-path MERGE_MSG)")" = "park: Merge branch 'side' into HEAD" ] ||
+    fail "the detached default message is wrong: [$(cat "$(git rev-parse --git-path MERGE_MSG)")]"
   [ "$(git symbolic-ref --short HEAD)" = "carrier/side" ] ||
     fail "the carrier was not created from the detached head"
   [ "$(git rev-parse main)" = "$O" ] || fail "the detached park moved main"
@@ -712,12 +720,15 @@ STAGED ON PURPOSE" ] || fail "a deliberately staged change was not carried into 
   assert_prepared main "$O" "$(git rev-parse side)" "$(git rev-parse carrier/side)" "commit '$(git rev-parse side)'"
 }
 
-@test "an empty message render parks no message file; the landing renders fresh, no comment" {
+@test "an empty message render parks no message file and no default; the landing renders fresh, no comment" {
   conflict_repo m17
   tag_the_source
   printf '# only a comment\n' >"$(git rev-parse --git-path MERGE_MSG)"
   run git park -b carrier/v1.2.3
   assert_success
+  # no message, no default: MERGE_MSG is cleared, not rewritten
+  [ ! -e "$(git rev-parse --git-path MERGE_MSG)" ] ||
+    fail "an empty message still left a default behind"
   git commit -qm parked
   if git cat-file -e HEAD:.hangar/message 2>/dev/null; then
     fail "an empty render must park no message at all"
@@ -731,6 +742,62 @@ STAGED ON PURPOSE" ] || fail "a deliberately staged change was not carried into 
   if grep -q 'Message recorded at park' "$(git rev-parse --git-path MERGE_MSG)"; then
     fail "an empty record produced a comment block"
   fi
+}
+
+@test "the parked commit's default message is the merge's own words, 'park: ' prefixed: a plain git commit opens the editor with it" {
+  conflict_repo m22
+  git park -b carrier/side >/dev/null
+  # GIT_EDITOR=true (the helpers' setting) keeps the template untouched: the commit lands as-is
+  git commit -q
+  [ "$(git log -1 --format=%B)" = "park: Merge branch 'side'" ] ||
+    fail "the parked commit did not carry the default: [$(git log -1 --format=%B)]"
+  [ ! -e "$(git rev-parse --git-path MERGE_MSG)" ] ||
+    fail "the parked commit left the prepared default behind"
+}
+
+@test "the default message is the editor's starting text: edit it, and the edit commits" {
+  conflict_repo m23
+  git park -b carrier/side >/dev/null
+  printf '#!/bin/sh\nprintf "park: edited by the user\\n" >"$1"\n' >"$CARRIER_WORK/editmsg"
+  chmod +x "$CARRIER_WORK/editmsg"
+  GIT_EDITOR="$CARRIER_WORK/editmsg" git commit -q
+  [ "$(git log -1 --format=%s)" = "park: edited by the user" ] ||
+    fail "the editor's edit did not become the commit's message: [$(git log -1 --format=%s)]"
+}
+
+@test "an emptied editor drops the commit; the prepared default survives for the retry" {
+  conflict_repo m24
+  git park -b carrier/side >/dev/null
+  printf '#!/bin/sh\n: >"$1"\n' >"$CARRIER_WORK/dropmsg"
+  chmod +x "$CARRIER_WORK/dropmsg"
+  run env GIT_EDITOR="$CARRIER_WORK/dropmsg" git commit
+  assert_failure
+  assert_output --partial "Aborting commit due to empty commit message"
+  [ -e "$(git rev-parse --git-path MERGE_MSG)" ] ||
+    fail "the dropped commit cleared the prepared default"
+  # the retry keeps the default: GIT_EDITOR=true (the helpers' setting) accepts it
+  git commit -q
+  [ "$(git log -1 --format=%B)" = "park: Merge branch 'side'" ] ||
+    fail "the retry did not carry the default: [$(git log -1 --format=%B)]"
+}
+
+@test "git commit -m overrides the default, and either commit clears MERGE_MSG" {
+  conflict_repo m25
+  git park -b carrier/side >/dev/null
+  git commit -qm 'my own parked message'
+  [ "$(git log -1 --format=%s)" = "my own parked message" ] ||
+    fail "the -m commit did not carry its own message"
+  [ ! -e "$(git rev-parse --git-path MERGE_MSG)" ] ||
+    fail "a -m commit left the prepared default behind"
+}
+
+@test "the merge's own words make the default: a custom -m message rides with the prefix" {
+  conflict_repo m26
+  git merge --abort
+  git merge -m "custom subject from the user" side >/dev/null 2>&1 || true
+  git park -b carrier/side >/dev/null
+  [ "$(cat "$(git rev-parse --git-path MERGE_MSG)")" = "park: custom subject from the user" ] ||
+    fail "the default is not the custom merge message prefixed: [$(cat "$(git rev-parse --git-path MERGE_MSG)")]"
 }
 
 @test "a symlink target starting with a dash round-trips (ln -s --)" {

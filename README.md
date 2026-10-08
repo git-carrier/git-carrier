@@ -52,9 +52,9 @@ park: 1 path parked into .hangar on carrier/v1.2.3; the hangar is staged
 park: main stays at 69a1f2c; land there later with: git land main
 park: run 'git commit' to create the parked commit (--no-verify if a pre-commit hook rejects the conflict-marker content)
 
-$ git commit -m 'park(main): merge v1.2.3'  # the parked merge begins; noting the destination in the message is optional
-$ git push origin v1.2.3                    # publish the recorded source too
-$ git push -u origin carrier/v1.2.3         # ordinary history: review, hand off
+$ git commit                            # opens the editor with the default message (park: Merge tag 'v1.2.3')
+$ git push origin v1.2.3                # publish the recorded source too
+$ git push -u origin carrier/v1.2.3     # ordinary history: review, hand off
 ```
 
 - Park moves the stopped merge onto the carrier without recreating it, and `main` stays untouched at its pre-merge commit.
@@ -72,7 +72,7 @@ $ git unpark -- f.txt
 unpark: unchanged (reopened): f.txt
 unpark: 1 path taken out of the hangar; 1 path reopened; 0 resolutions released
 
-$ $EDITOR f.txt                     # or git mergetool
+$ $EDITOR f.txt                 # or git mergetool
 $ git add -- f.txt
 $ git commit -m 'resolve: f.txt'
 $ git push
