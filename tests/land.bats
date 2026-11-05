@@ -132,10 +132,10 @@ complete_chain() {
   [ "$(git rev-parse main)" = "$O" ] || fail "the held-paths report moved main"
 }
 
-@test "case 3: a path resolved and committed without its release is only missing the release" {
+@test "case 3: a path committed without its release is reported as modified, then release lands" {
   # the usual forgetting point: fixed, added, committed, the release never run. The hangar
-  # still holds it, but the tip carries the resolution, so the refusal names only the missing
-  # release, not a reopen of work that is already done.
+  # still holds it, but the tip differs from w, so the refusal names the missing release
+  # without claiming the content is complete.
   parked_chain l13r lr
   printf 'a\nRESOLVED\nc\n' >f.txt
   git add f.txt
@@ -143,10 +143,13 @@ complete_chain() {
   run git land main
   assert_failure
   [ "$status" -eq 2 ]
-  assert_output --partial "already resolved but not released: f.txt"
-  assert_output --partial "git rm its .hangar/stages/<path>"
+  assert_output --partial "modified but still held: f.txt"
+  assert_output --partial "keep the stages directory while the work is partial"
   case $output in
-  *"reopen and resolve"*) fail "a resolved path was told to reopen" ;;
+  *"already resolved"*) fail "a held path was still called resolved" ;;
+  esac
+  case $output in
+  *"reopen and resolve"*) fail "a modified path was told to reopen" ;;
   esac
   [ "$(git rev-parse main)" = "$O" ] || fail "the report moved main"
   # the named recovery is the whole missing step: release, commit, land
@@ -157,10 +160,30 @@ complete_chain() {
   assert_output --partial "prepared the landing on main"
 }
 
-@test "case 3: a mode-only resolution already committed is missing only the release" {
-  # the usual forgetting point, mode edition: chmod resolved the file, added, committed,
+@test "case 3: committed partial content is modified but still held, not resolved" {
+  parked_chain l13p lp
+  # one marker block removed, another left in place: the content is not complete
+  printf 'a\nPARTIAL\n<<<<<<< HEAD\nOURS\n=======\nTHEIRS\n>>>>>>> side\nc\n' >f.txt
+  git add f.txt
+  git commit -qm "partial resolution"
+  run git land main
+  assert_failure
+  [ "$status" -eq 2 ]
+  assert_output --partial "modified but still held: f.txt"
+  case $output in
+  *"already resolved"*) fail "a partial resolution was called resolved" ;;
+  esac
+  # the release is still the whole completion record
+  git rm -q -r .hangar/stages/f.txt
+  git commit -qm release
+  run git land main
+  assert_success
+}
+
+@test "case 3: a mode-only change already committed is reported as modified, not unchanged" {
+  # the usual forgetting point, mode edition: chmod changed the file, added, committed,
   # the release never run. The tip carries the same blob as w with a different mode, so it
-  # is a resolution already committed, not an unchanged state to reopen
+  # is modified content, not an unchanged state to reopen
   parked_chain l13m2 lb
   chmod 755 f.txt
   git add f.txt
@@ -168,9 +191,9 @@ complete_chain() {
   run git land main
   assert_failure
   [ "$status" -eq 2 ]
-  assert_output --partial "already resolved but not released: f.txt"
+  assert_output --partial "modified but still held: f.txt"
   case $output in
-  *"still unchanged"*) fail "a mode-only resolution was reported as unchanged" ;;
+  *"still unchanged"*) fail "a mode-only change was reported as unchanged" ;;
   esac
   git rm -q -r .hangar/stages/f.txt
   git commit -qm release
@@ -205,10 +228,10 @@ complete_chain() {
   assert_failure
   [ "$status" -eq 2 ]
   assert_output --partial "still unchanged: g.txt"
-  assert_output --partial "already resolved but not released: f.txt"
-  assert_output --partial "1 conflict still unchanged and 1 resolution committed but not released"
+  assert_output --partial "modified but still held: f.txt"
+  assert_output --partial "1 conflict still unchanged and 1 modified path still held"
   assert_output --partial "unpark, fix, add, and commit unchanged paths"
-  assert_output --partial "unpark already-resolved paths and commit their releases"
+  assert_output --partial "release each modified path only when its content is final"
 }
 
 @test "case 3: paths nested under each other are each listed once, in record order" {
@@ -237,8 +260,8 @@ complete_chain() {
   assert_failure
   [ "$status" -eq 2 ]
   assert_output --partial "still unchanged: a/2z, a/b"
-  assert_output --partial "already resolved but not released: a"
-  assert_output --partial "2 conflicts still unchanged and 1 resolution committed but not released"
+  assert_output --partial "modified but still held: a"
+  assert_output --partial "2 conflicts still unchanged and 1 modified path still held"
   [ "$(git rev-parse main)" = "$(git rev-parse HEAD)" ] || fail "the held-paths report moved main"
 }
 
@@ -287,8 +310,8 @@ complete_chain() {
   assert_failure
   [ "$status" -eq 2 ]
   assert_output --partial "still unchanged: a/x"
-  assert_output --partial "already resolved but not released: a"
-  assert_output --partial "1 conflict still unchanged and 1 resolution committed but not released"
+  assert_output --partial "modified but still held: a"
+  assert_output --partial "1 conflict still unchanged and 1 modified path still held"
   # the same hangar is unpark's mangled-hangar refusal
   run git unpark
   assert_failure

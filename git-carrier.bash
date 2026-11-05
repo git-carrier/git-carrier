@@ -1755,7 +1755,7 @@ prune_stages_dirs() {
 #           chain (the refusal names the switch onto the chain branch; a manifest first line
 #           that is not ours dies first: the hangar is not this tool's); paths still held,
 #           reported per path with the recovery that fits (still unchanged: the git unpark
-#           hint; resolution already in the chain: only the release), exit 2; w-only
+#           hint; modified but still held: finish it, then release), exit 2; w-only
 #           directories, an incomplete hangar, exit 2; a worktree file, untracked or ignored,
 #           standing on a path the resolved tree tracks; tracked changes in the checkout where
 #           the landing starts; and <dst> at any position but at or behind the base, at the
@@ -1933,35 +1933,36 @@ warn_stale_branch() {
 land_chain() {
   local rec rest dirty extra
   local base resolved_tree dst_tip p2 amended where
-  local i FROZEN RESOLVED NFRO NRES
+  local i UNCHANGED MODIFIED NUNCHANGED NMODIFIED
 
   # --- held-paths check ---
   held_paths_of "$chain_tip"
   if [ "$NHELD" -gt 0 ]; then
-    # Report each held path with the recovery that fits it: the hangar still holds it, but the
-    # chain tip may already carry the resolution (the usual forgetting point: fixed, added,
-    # committed, never released), and then only the release is missing.
+    # Report each held path with the recovery that fits it: the hangar still holds it, and the
+    # chain tip may carry final work or only a partial change. Land cannot inspect content, so a
+    # changed path is reported as modified, never as resolved; the stages release is the only
+    # completion record.
     classify_held_paths "$chain_tip"
     # One report line per group, capped: the classification is the new information. An unchanged-only
     # state prints no line; its refusal already lists the paths.
-    if [ "$NRES" -gt 0 ]; then
-      if [ "$NFRO" -gt 0 ]; then
-        echo "$APPLET: still unchanged: $(cap_list 10 "${FROZEN[@]}")" >&2
+    if [ "$NMODIFIED" -gt 0 ]; then
+      if [ "$NUNCHANGED" -gt 0 ]; then
+        echo "$APPLET: still unchanged: $(cap_list 10 "${UNCHANGED[@]}")" >&2
       fi
-      echo "$APPLET: already resolved but not released: $(cap_list 10 "${RESOLVED[@]}")" >&2
+      echo "$APPLET: modified but still held: $(cap_list 10 "${MODIFIED[@]}")" >&2
     fi
-    if [ "$NRES" -eq 0 ]; then
+    if [ "$NMODIFIED" -eq 0 ]; then
       refuse_recovery \
         "conflicts are still held: $(cap_list 10 "${HELD_PATHS[@]}")." \
         "for each path, run 'git unpark -- <path>', fix it, git add it, and commit; unpark records the release"
-    elif [ "$NFRO" -eq 0 ]; then
+    elif [ "$NUNCHANGED" -eq 0 ]; then
       refuse_recovery \
-        "$(counted "$NRES" resolution) already committed but not released." \
-        "run 'git unpark -- <path>' for each listed path (or git rm its $HANGAR/stages/<path>), then commit the releases"
+        "$(counted "$NMODIFIED" "modified path") still held." \
+        "keep the stages directory while the work is partial; when final, release with 'git unpark -- <path>' or 'git rm -r $HANGAR/stages/<path>', then commit"
     else
       refuse_recovery \
-        "$(counted "$NFRO" conflict) still unchanged and $(counted "$NRES" resolution) committed but not released." \
-        "unpark, fix, add, and commit unchanged paths; unpark already-resolved paths and commit their releases"
+        "$(counted "$NUNCHANGED" conflict) still unchanged and $(counted "$NMODIFIED" "modified path") still held." \
+        "unpark, fix, add, and commit unchanged paths; release each modified path only when its content is final, then commit"
     fi
   fi
   if [ "$NWONLY" -gt 0 ]; then
@@ -2174,26 +2175,26 @@ held_paths_of() {
   done
 }
 
-# Classify the held paths (set by held_paths_of) by what the chain tip carries, into FROZEN/NFRO
-# and RESOLVED/NRES, the caller's through dynamic scoping. This is unpark's outcome comparison
-# against the committed chain: the tip's entry at the path, its blob and its mode, vs the stored
-# file w's blob and mode, and absent == absent is a match. A match is still unchanged. A
-# difference is a resolution already committed, missing only its release; a mode-only
-# resolution (a chmod, a type change on the same bytes) included, or it would be told to reopen
-# work it already carries. The worktree is never consulted: land works from the chain.
+# Classify the held paths (set by held_paths_of) by what the chain tip carries, into
+# UNCHANGED/NUNCHANGED and MODIFIED/NMODIFIED, the caller's through dynamic scoping. This is the
+# comparison against the committed chain: the tip's entry at the path, its blob and its mode, vs
+# the stored file w's blob and mode, and absent == absent is a match. A match is still unchanged.
+# A difference is modified content, not a completion claim: the path remains held, and only the
+# stages release is the resolution record. A mode-only change (a chmod, a type change on the same
+# bytes) is modified too. The worktree is never consulted: land works from the chain.
 #
 # ls-tree answers the entry in one call per held path: the literal prefix is the one magic
 # its mask accepts (it clears the wildcard flags besides, so a path holding glob bytes is
 # still a literal name), and a directory spec shows the directory's own entry, so the
 # record's path is matched exactly. Anything the file became instead of the blob w (a
-# directory 040000, a gitlink 160000) and an absent path both fall to RESOLVED, as no blob
+# directory 040000, a gitlink 160000) and an absent path both fall to MODIFIED, as no blob
 # w ever equaled their ids before them either.
 classify_held_paths() {
   local tip=$1 i p rec tmode tsha path
-  FROZEN=()
-  RESOLVED=()
-  NFRO=0
-  NRES=0
+  UNCHANGED=()
+  MODIFIED=()
+  NUNCHANGED=0
+  NMODIFIED=0
   for ((i = 0; i < NHELD; i++)); do
     p=${HELD_PATHS[$i]}
     tmode=
@@ -2211,11 +2212,11 @@ classify_held_paths() {
       break
     done <"$td/tipentry"
     if [ "$tsha" = "${HELD_W[$i]}" ] && [ "$tmode" = "${HELD_WM[$i]}" ]; then
-      FROZEN[NFRO]=$p
-      NFRO=$((NFRO + 1))
+      UNCHANGED[NUNCHANGED]=$p
+      NUNCHANGED=$((NUNCHANGED + 1))
     else
-      RESOLVED[NRES]=$p
-      NRES=$((NRES + 1))
+      MODIFIED[NMODIFIED]=$p
+      NMODIFIED=$((NMODIFIED + 1))
     fi
   done
 }

@@ -156,7 +156,9 @@ record, and it is whole: the directory and everything under it go
 together, so releasing a path releases every held path beneath it. A tree
 cannot hold an empty directory, so the deletion itself is what any
 ordinary diff review shows, and the structure above a release folds away
-with it and releases nothing.
+with it and releases nothing. Changed content alone does not release a
+path: partial and complete work are both held until the stage files are
+gone.
 
 Transit
 -------

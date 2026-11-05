@@ -82,7 +82,7 @@ $ git push
 - Unchanged: the conflict is restored into the index, as git left it.
 - Changed in content, mode, or type, or deleted: no conflict is recreated. The working file is your resolution, left unstaged for review.
 - Either way the path is released from the hangar.
-- You can also work the hangar by hand: fix the file, `git add -- <path>`, release it with `git rm -r .hangar/stages/<path>`, and commit.
+- You can also resolve a path without `git unpark`: edit the file, run `git add -- <path>`, and commit your changes. Once the resolution is final, remove its stage directory with `git rm -r .hangar/stages/<path>` and commit the removal. The stage directory marks the path as unfinished, so `git land` refuses to proceed until that removal is committed.
 
 Once every path is released, check that the merge is ready, then land and commit:
 
